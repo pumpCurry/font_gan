@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.13 (PR #6)
-:since:   1.0.13 (PR #6)
-:last-modified: 2025-06-22 12:16:29 JST+9
+:version: 1.0.15 (PR #7)
+:since:   1.0.15 (PR #7)
+:last-modified: 2025-06-22 12:30:00 JST+9
 :todo:
     - Refactor training loop for CLI usage
 """
@@ -17,13 +17,41 @@
 import io
 import os
 import glob
+import random
 from typing import Callable, Tuple, Dict
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import torch
 from torch import nn, optim
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as T
+
+
+class RandomStrokeWidth:
+    """ランダムに文字の太さを変える前処理。"""
+
+    def __init__(self, radius: int = 1, p: float = 0.5) -> None:
+        self.radius = radius
+        self.p = p
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        if random.random() < self.p:
+            if random.random() < 0.5:
+                return img.filter(ImageFilter.MaxFilter(self.radius))
+            return img.filter(ImageFilter.MinFilter(self.radius))
+        return img
+
+
+class AddGaussianNoise:
+    """Tensor にガウシアンノイズを加える。"""
+
+    def __init__(self, mean: float = 0.0, std: float = 0.02) -> None:
+        self.mean = mean
+        self.std = std
+
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        noise = torch.randn_like(tensor) * self.std + self.mean
+        return tensor + noise
 
 
 def render_char_to_png(font_path: str, char: str, out_path_or_buffer: str | io.BytesIO, size: int = 256) -> Image.Image:
@@ -67,7 +95,13 @@ def render_char_to_png(font_path: str, char: str, out_path_or_buffer: str | io.B
 class FontPairDataset(Dataset):
     """参考フォント画像とターゲットフォント画像のペアを提供する。"""
 
-    def __init__(self, source_dir: str, target_dir: str, transform: Callable | None = None) -> None:
+    def __init__(
+        self,
+        source_dir: str,
+        target_dir: str,
+        transform: Callable | None = None,
+        augment: bool = False,
+    ) -> None:
         """ディレクトリから画像ペアを読み込む。
 
         :param source_dir: 参考フォント画像ディレクトリ
@@ -76,6 +110,8 @@ class FontPairDataset(Dataset):
         :type target_dir: str
         :param transform: 前処理変換
         :type transform: Callable | None
+        :param augment: データ増強を有効にするかどうか
+        :type augment: bool
         """
         src = sorted(glob.glob(os.path.join(source_dir, "*.png")))
         tgt = []
@@ -88,10 +124,23 @@ class FontPairDataset(Dataset):
         valid_src = [p for p in src if os.path.join(target_dir, os.path.basename(p)) in tgt]
         self.src_paths = valid_src
         self.tgt_paths = [os.path.join(target_dir, os.path.basename(p)) for p in valid_src]
-        self.transform = transform or T.Compose([
-            T.ToTensor(),
-            T.Normalize((0.5,), (0.5,)),
-        ])
+        if transform:
+            self.transform = transform
+        else:
+            transforms = []
+            if augment:
+                transforms.extend(
+                    [
+                        T.RandomAffine(degrees=2, translate=(0.02, 0.02), scale=(0.95, 1.05)),
+                        RandomStrokeWidth(radius=1, p=0.5),
+                    ]
+                )
+            transforms.extend([
+                T.ToTensor(),
+                AddGaussianNoise(),
+                T.Normalize((0.5,), (0.5,)),
+            ])
+            self.transform = T.Compose(transforms)
 
     def __len__(self) -> int:
         """データ数を返す。"""
@@ -193,8 +242,39 @@ def train(
     checkpoint_dir: str = "checkpoints",
     source_data_dir: str = "data/train/source",
     target_data_dir: str = "data/train/target",
+    pretrained_G_path: str | None = None,
+    pretrained_D_path: str | None = None,
+    augment: bool = False,
 ) -> None:
-    """学習ループを実行する。"""
+    """学習ループを実行する。
+
+    :param target_font_path: 目標フォントファイルパス
+    :type target_font_path: str
+    :param ref_font_path: 参考フォントファイルパス
+    :type ref_font_path: str
+    :param chars_to_render: 学習に用いる文字マップ
+    :type chars_to_render: Dict[int, str]
+    :param epochs: 学習エポック数
+    :type epochs: int
+    :param batch_size: ミニバッチサイズ
+    :type batch_size: int
+    :param lr: 学習率
+    :type lr: float
+    :param l1_lambda: L1 損失の重み
+    :type l1_lambda: int
+    :param checkpoint_dir: チェックポイント保存先
+    :type checkpoint_dir: str
+    :param source_data_dir: 参考フォント画像ディレクトリ
+    :type source_data_dir: str
+    :param target_data_dir: ターゲットフォント画像ディレクトリ
+    :type target_data_dir: str
+    :param pretrained_G_path: 事前学習済みGenerator
+    :type pretrained_G_path: str | None
+    :param pretrained_D_path: 事前学習済みDiscriminator
+    :type pretrained_D_path: str | None
+    :param augment: データ増強を有効にするか
+    :type augment: bool
+    """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(source_data_dir, exist_ok=True)
     os.makedirs(target_data_dir, exist_ok=True)
@@ -204,7 +284,7 @@ def train(
         render_char_to_png(ref_font_path, glyph, os.path.join(source_data_dir, f"{code}.png"))
         render_char_to_png(target_font_path, glyph, os.path.join(target_data_dir, f"{code}.png"))
 
-    ds = FontPairDataset(source_data_dir, target_data_dir)
+    ds = FontPairDataset(source_data_dir, target_data_dir, augment=augment)
     if len(ds) == 0:
         print("Dataset is empty")
         return
@@ -221,8 +301,15 @@ def train(
             nn.init.normal_(m.weight.data, 1.0, 0.02)
             nn.init.constant_(m.bias.data, 0)
 
-    G.apply(weights_init)
-    D.apply(weights_init)
+    if pretrained_G_path and os.path.exists(pretrained_G_path):
+        G.load_state_dict(torch.load(pretrained_G_path, map_location=device))
+    else:
+        G.apply(weights_init)
+
+    if pretrained_D_path and os.path.exists(pretrained_D_path):
+        D.load_state_dict(torch.load(pretrained_D_path, map_location=device))
+    else:
+        D.apply(weights_init)
 
     opt_G = optim.Adam(G.parameters(), lr=lr, betas=(0.5, 0.999))
     opt_D = optim.Adam(D.parameters(), lr=lr, betas=(0.5, 0.999))
@@ -307,6 +394,48 @@ def inference(
             Image.fromarray(out).save(file_names[j])
 
 
+def stagewise_train(
+    target_font_path: str,
+    ref_font_path: str,
+    all_chars: Dict[int, str],
+    fine_tune_chars: Dict[int, str] | None = None,
+    stage1_epochs: int = 200,
+    stage2_epochs: int = 20,
+    stage1_lr: float = 2e-4,
+    stage2_lr: float = 1e-5,
+    checkpoint_dir: str = "checkpoints",
+    **kwargs,
+) -> None:
+    """事前学習と微調整を続けて行うヘルパー関数。"""
+
+    train(
+        target_font_path=target_font_path,
+        ref_font_path=ref_font_path,
+        chars_to_render=all_chars,
+        epochs=stage1_epochs,
+        lr=stage1_lr,
+        checkpoint_dir=checkpoint_dir,
+        **kwargs,
+    )
+
+    if not fine_tune_chars:
+        return
+
+    g_ckpt = os.path.join(checkpoint_dir, f"G_epoch{stage1_epochs:03d}.pth")
+    d_ckpt = os.path.join(checkpoint_dir, f"D_epoch{stage1_epochs:03d}.pth")
+    train(
+        target_font_path=target_font_path,
+        ref_font_path=ref_font_path,
+        chars_to_render=fine_tune_chars,
+        epochs=stage2_epochs,
+        lr=stage2_lr,
+        checkpoint_dir=checkpoint_dir,
+        pretrained_G_path=g_ckpt,
+        pretrained_D_path=d_ckpt,
+        **kwargs,
+    )
+
+
 if __name__ == "__main__":
     TARGET_FONT_PATH = "path/to/GD-HighwayGothicJA.otf"
     REFERENCE_FONT_PATH = "path/to/reference_font.otf"
@@ -328,24 +457,29 @@ if __name__ == "__main__":
     if not os.path.exists(TARGET_FONT_PATH) or not os.path.exists(REFERENCE_FONT_PATH):
         raise FileNotFoundError("Font file not found")
 
-    train(
-        target_font_path=TARGET_FONT_PATH,
-        ref_font_path=REFERENCE_FONT_PATH,
-        chars_to_render=common_chars_for_training,
-        epochs=NUM_EPOCHS,
-        batch_size=BATCH_SIZE,
-        lr=LEARNING_RATE,
-        l1_lambda=L1_LAMBDA,
-        checkpoint_dir=CHECKPOINT_DIR,
-        source_data_dir=os.path.join(OUTPUT_DIR_TRAIN, "train", "source"),
-        target_data_dir=os.path.join(OUTPUT_DIR_TRAIN, "train", "target"),
-    )
-
     missing_chars_to_generate = {
         ord("琉"): "琉",
     }
-    latest_checkpoint = os.path.join(CHECKPOINT_DIR, f"G_epoch{NUM_EPOCHS:03d}.pth")
-    if os.path.exists(latest_checkpoint) and missing_chars_to_generate:
+
+    stagewise_train(
+        target_font_path=TARGET_FONT_PATH,
+        ref_font_path=REFERENCE_FONT_PATH,
+        all_chars=common_chars_for_training,
+        fine_tune_chars=missing_chars_to_generate,
+        stage1_epochs=NUM_EPOCHS,
+        stage2_epochs=50,
+        stage1_lr=LEARNING_RATE,
+        stage2_lr=LEARNING_RATE * 0.1,
+        checkpoint_dir=CHECKPOINT_DIR,
+        batch_size=BATCH_SIZE,
+        l1_lambda=L1_LAMBDA,
+        source_data_dir=os.path.join(OUTPUT_DIR_TRAIN, "train", "source"),
+        target_data_dir=os.path.join(OUTPUT_DIR_TRAIN, "train", "target"),
+        augment=True,
+    )
+
+    latest_checkpoint = os.path.join(CHECKPOINT_DIR, f"G_epoch{NUM_EPOCHS+50:03d}.pth")
+    if os.path.exists(latest_checkpoint):
         inference(
             gen_checkpoint=latest_checkpoint,
             chars_to_generate=missing_chars_to_generate,
