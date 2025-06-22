@@ -10,6 +10,7 @@
 - [学習手順](usage/training.md)
 - [推論手順](usage/inference.md)
 - [学習戦略](training_strategy.md)
+- [設定ファイルによる実行](configuration.md)
 - [検討過程のメモ](process.md)
 - [大解像度画像利用の検討](high_resolution.md)
 - [実装の概要](technical_details.md)
