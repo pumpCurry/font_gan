@@ -310,12 +310,10 @@ def main() -> None:
         >>> main()
     """
 
+if __name__ == "__main__":
+    # 学習
     train()
 
-    # Example usage of inference:
-    # missing_chars = ["あ", "い", "う"]
-    # inference("checkpoints/G_200.pth", missing_chars, "reference_font.otf", "output")
-
-
-if __name__ == "__main__":
-    main()
+    # 推論例
+    # missing = ["あ", "い", "う"]  # 補完したい文字リスト
+    # inference("checkpoints/G_200.pth", missing, "reference_font.otf", "output")

@@ -7,3 +7,9 @@ pix2pix を用いた条件付き GAN により、参考フォントから GD-高
 * [学習手順](usage/training.md)
 * [推論手順](usage/inference.md)
 
+## 5. 関連ドキュメント
+
+- [使用方法の詳細](usage.md)
+- [検討過程のメモ](process.md)
+
+
