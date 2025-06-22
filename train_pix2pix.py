@@ -10,6 +10,7 @@
 :version: 1.0.18 (PR #9)
 :since:   1.0.15 (PR #7)
 :last-modified: 2025-06-22 22:03:48 JST+9
+
 :todo:
     - Refactor training loop for CLI usage
 """
@@ -26,6 +27,7 @@ from torch import nn, optim
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as T
 import torchvision.models as models
+import torch.nn.functional as F
 
 
 class RandomStrokeWidth:
@@ -55,22 +57,40 @@ class AddGaussianNoise:
         return tensor + noise
 
 
-class PerceptualLoss(nn.Module):
-    """VGG16 を利用した簡易 Perceptual Loss."""
+class VGGPerceptualLoss(nn.Module):
+    """VGG16 を用いた知覚損失。"""
 
-    def __init__(self, weight: float = 1.0) -> None:
+    def __init__(self, resize: bool = True) -> None:
         super().__init__()
-        vgg = models.vgg16(weights=models.VGG16_Weights.DEFAULT).features[:16].eval()
-        for p in vgg.parameters():
-            p.requires_grad = False
-        self.vgg = vgg
-        self.weight = weight
+        vgg_features = models.vgg16(weights=models.VGG16_Weights.DEFAULT).features
+        self.vgg_layers = nn.Sequential(*list(vgg_features)).eval()
+        for param in self.vgg_layers.parameters():
+            param.requires_grad = False
+        self.layer_ids = [3, 8, 15, 22]
+        self.resize = resize
+        self.mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+        self.std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        pred_feat = self.vgg(pred.repeat(1, 3, 1, 1))
-        tgt_feat = self.vgg(target.repeat(1, 3, 1, 1))
-        return torch.nn.functional.l1_loss(pred_feat, tgt_feat) * self.weight
-
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        if x.shape[1] == 1:
+            x = x.repeat(1, 3, 1, 1)
+            y = y.repeat(1, 3, 1, 1)
+        x = (x - self.mean.to(x.device)) / self.std.to(x.device)
+        y = (y - self.mean.to(y.device)) / self.std.to(y.device)
+        if self.resize:
+            x = F.interpolate(x, size=(224, 224), mode="bilinear", align_corners=False)
+            y = F.interpolate(y, size=(224, 224), mode="bilinear", align_corners=False)
+        loss = 0.0
+        cur_x = x
+        cur_y = y
+        last = 0
+        for layer_idx in self.layer_ids:
+            sub = self.vgg_layers[last:layer_idx + 1]
+            cur_x = sub(cur_x)
+            cur_y = sub(cur_y)
+            loss += F.l1_loss(cur_x, cur_y)
+            last = layer_idx + 1
+        return loss
 
 def render_char_to_png(font_path: str, char: str, out_path_or_buffer: str | io.BytesIO, size: int = 256) -> Image.Image:
     """指定したフォントで1文字を描画し PNG へ保存する。
@@ -290,6 +310,9 @@ def train(
     batch_size: int = 4,
     lr: float = 2e-4,
     l1_lambda: int = 100,
+    perceptual_lambda: float = 0.0,
+    use_perceptual_loss: bool = False,
+    img_size: int = 256,
     checkpoint_dir: str = "checkpoints",
     source_data_dir: str = "data/train/source",
     target_data_dir: str = "data/train/target",
@@ -316,6 +339,12 @@ def train(
     :type lr: float
     :param l1_lambda: L1 損失の重み
     :type l1_lambda: int
+    :param perceptual_lambda: 知覚損失の重み
+    :type perceptual_lambda: float
+    :param use_perceptual_loss: VGG 知覚損失を使用するか
+    :type use_perceptual_loss: bool
+    :param img_size: 画像レンダリングサイズ
+    :type img_size: int
     :param checkpoint_dir: チェックポイント保存先
     :type checkpoint_dir: str
     :param source_data_dir: 参考フォント画像ディレクトリ
@@ -341,8 +370,18 @@ def train(
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     for code, glyph in chars_to_render.items():
-        render_char_to_png(ref_font_path, glyph, os.path.join(source_data_dir, f"{code}.png"))
-        render_char_to_png(target_font_path, glyph, os.path.join(target_data_dir, f"{code}.png"))
+        render_char_to_png(
+            ref_font_path,
+            glyph,
+            os.path.join(source_data_dir, f"{code}.png"),
+            size=img_size,
+        )
+        render_char_to_png(
+            target_font_path,
+            glyph,
+            os.path.join(target_data_dir, f"{code}.png"),
+            size=img_size,
+        )
 
     ds = FontPairDataset(
         source_data_dir,
@@ -384,6 +423,7 @@ def train(
     criterion_GAN = nn.BCEWithLogitsLoss()
     criterion_L1 = nn.L1Loss()
     perceptual = PerceptualLoss(weight=perceptual_lambda).to(device) if perceptual_lambda > 0 else None
+    perceptual_loss = VGGPerceptualLoss().to(device) if use_perceptual_loss else None
 
     for epoch in range(1, epochs + 1):
         G.train()
@@ -411,10 +451,13 @@ def train(
                 loss_G = loss_G_GAN + loss_G_L1 + loss_G_per
             else:
                 loss_G = loss_G_GAN + loss_G_L1
+
             loss_G.backward()
             opt_G.step()
 
-        print(f"Epoch {epoch:03d} loss_D:{loss_D.item():.4f} loss_G:{loss_G.item():.4f}")
+        print(
+            f"Epoch {epoch:03d} loss_D:{loss_D.item():.4f} loss_G:{loss_G.item():.4f}"
+        )
         if epoch % 10 == 0 or epoch == epochs:
             torch.save(G.state_dict(), os.path.join(checkpoint_dir, f"G_epoch{epoch:03d}.pth"))
             torch.save(D.state_dict(), os.path.join(checkpoint_dir, f"D_epoch{epoch:03d}.pth"))
@@ -560,12 +603,15 @@ if __name__ == "__main__":
         checkpoint_dir=CHECKPOINT_DIR,
         batch_size=BATCH_SIZE,
         l1_lambda=L1_LAMBDA,
+        perceptual_lambda=1.0,
+        use_perceptual_loss=True,
         source_data_dir=os.path.join(OUTPUT_DIR_TRAIN, "train", "source"),
         target_data_dir=os.path.join(OUTPUT_DIR_TRAIN, "train", "target"),
         augment=True,
         rehearsal_ratio=0.1,
         freeze_layers=2,
         perceptual_lambda=0.1,
+        img_size=256,
     )
 
     latest_checkpoint = os.path.join(CHECKPOINT_DIR, f"G_epoch{NUM_EPOCHS+50:03d}.pth")
