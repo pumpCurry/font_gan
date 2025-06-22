@@ -14,6 +14,7 @@ python train_pix2pix.py
 エポックごとに進捗が表示され、10エポックごとに `checkpoints/` へモデルが保存されます。
 `img_size` や `num_downs` を調整することで 512px までの高解像度モデルが学習可能です。
 GPU メモリが厳しい場合は `use_amp=True` を指定すると混合精度学習となります。
+`log_memory=True` を渡すと各エポック後に GPU 使用量が出力されます。
 
 ## 2 段階学習
 
@@ -36,4 +37,12 @@ stagewise_train(
 
 最初に全文字で学習した後、指定文字のみを低学習率で微調整します。`rehearsal_ratio` を指定すると既存文字の一部も混在させ、忘却を防ぎます。`freeze_layers` でジェネレータの前半層を固定でき、`perceptual_lambda` を設定すると Perceptual Loss が有効になります。`augment=True` を指定するとアフィン変換やノイズ付与などの前処理が行われます。
 `norm_type` には `batch` と `instance` が選択でき、スタイル転送用途では InstanceNorm を推奨します。
+
+## 設定ファイルからの学習
+
+複数のハイパーパラメータを YAML にまとめ、`train_from_config` 関数から読み込むことができます。
+
+```bash
+python -c "from train_pix2pix import train_from_config; train_from_config('conf.yaml')"
+```
 

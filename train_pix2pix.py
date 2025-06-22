@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.26 (PR #11)
+:version: 1.0.28 (PR #13)
 :since:   1.0.15 (PR #7)
-:last-modified: 2025-06-22 23:28:26 JST+9
+:last-modified: 2025-06-22 23:56:18 JST+9
 
 :todo:
     - Refactor training loop for CLI usage
@@ -24,6 +24,7 @@ from typing import Callable, Tuple, Dict
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from skimage.metrics import peak_signal_noise_ratio as calc_psnr
 from skimage.metrics import structural_similarity as calc_ssim
+import yaml
 import numpy as np
 from scipy.ndimage import binary_dilation, binary_erosion
 import torch
@@ -417,6 +418,7 @@ def train(
     augment_source_only: bool = False,
     freeze_layers: int = 0,
     norm_type: str = "batch",
+    log_memory: bool = False,
 ) -> None:
     """学習ループを実行する。
 
@@ -462,6 +464,8 @@ def train(
     :type freeze_layers: int
     :param norm_type: 正規化レイヤー種別 ("batch" or "instance")
     :type norm_type: str
+    :param log_memory: 各エポック終了時にGPUメモリ使用量を表示する
+    :type log_memory: bool
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(source_data_dir, exist_ok=True)
@@ -575,6 +579,10 @@ def train(
         )
         scheduler_G.step()
         scheduler_D.step()
+        if log_memory and torch.cuda.is_available():
+            allocated = torch.cuda.max_memory_allocated() / (1024 ** 2)
+            print(f"GPU memory max usage: {allocated:.2f} MB")
+            torch.cuda.reset_peak_memory_stats()
         if epoch % 10 == 0 or epoch == epochs:
             torch.save(G.state_dict(), os.path.join(checkpoint_dir, f"G_epoch{epoch:03d}.pth"))
             torch.save(D.state_dict(), os.path.join(checkpoint_dir, f"D_epoch{epoch:03d}.pth"))
@@ -720,6 +728,14 @@ def stagewise_train(
         norm_type=kwargs.get("norm_type", "batch"),
         **kwargs,
     )
+
+
+def train_from_config(config_path: str) -> None:
+    """YAML ファイルから設定を読み込み :func:`train` を実行する。"""
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    train(**cfg)
 
 
 if __name__ == "__main__":
