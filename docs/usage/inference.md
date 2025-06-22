@@ -5,8 +5,8 @@
 ```python
 from train_pix2pix import inference
 
-chars = ["あ", "い", "う"]
-inference("checkpoints/G_200.pth", chars, "reference_font.otf", "output")
+chars = {ord("あ"): "あ", ord("い"): "い"}
+inference("checkpoints/G_epoch200.pth", chars, "reference_font.otf", "output")
 ```
 
 `output/` に Unicode 番号をファイル名とした PNG が生成されます。
