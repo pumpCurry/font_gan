@@ -49,10 +49,18 @@ python -c "from train_pix2pix import train_from_config; train_from_config('conf.
 
 ## 自動2段階学習スクリプト
 
-`train_pix2pix_pro.py` を実行すると、256px での事前学習と 512px での微調整を連続で行えます。
-フォントパスや文字セットを設定した上で以下のように実行してください。
+`train_pix2pix_pro.py` を実行すると、256px での事前学習と 512px での微調整を連続で行えます。主要な設定はコマンドライン引数から変更でき、実行中は `tqdm` による進捗バーが表示されます。
 
 ```bash
-python train_pix2pix_pro.py
+python train_pix2pix_pro.py \
+  --stage s1_256 \
+  --ref_font ./fonts/reference_font.otf \
+  --target_font ./fonts/GD-HighwayGothicJA.otf
+
+python train_pix2pix_pro.py \
+  --stage s2_512 \
+  --ref_font ./fonts/reference_font.otf \
+  --target_font ./fonts/GD-HighwayGothicJA.otf \
+  --checkpoint_dir ./checkpoints/gd_highway_pro
 ```
 
