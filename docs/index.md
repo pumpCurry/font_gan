@@ -56,7 +56,8 @@ inference("checkpoints/G_200.pth", chars, "reference_font.otf", "output")
 
 生成された PNG からベクターフォントへ変換する場合は、FontForge の自動トレース機能などを組み合わせます。さらに品質を向上させたい場合は、モデルの深層化やストローク一貫性を考慮した損失の追加等を検討してください。
 
-## 関連ドキュメント
+
+## 5. 関連ドキュメント
 
 - [使用方法の詳細](usage.md)
 - [検討過程のメモ](process.md)
