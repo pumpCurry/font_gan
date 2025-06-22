@@ -6,6 +6,7 @@
 
 ## ドキュメント構成
 
+- [環境構築ガイド](installation.md)
 - [使用方法の概要](usage.md)
 - [学習手順](usage/training.md)
 - [推論手順](usage/inference.md)

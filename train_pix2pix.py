@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.28 (PR #13)
+:version: 1.0.29 (PR #14)
 :since:   1.0.15 (PR #7)
-:last-modified: 2025-06-22 23:56:18 JST+9
+:last-modified: 2025-06-23 04:49:50 JST+9
 
 :todo:
     - Refactor training loop for CLI usage
