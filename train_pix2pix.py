@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.22 (PR #9)
+:version: 1.0.23 (PR #10)
 :since:   1.0.15 (PR #7)
-:last-modified: 2025-06-23 00:00:00 JST+9
+:last-modified: 2025-06-24 00:00:00 JST+9
 
 :todo:
     - Refactor training loop for CLI usage
@@ -22,6 +22,8 @@ import random
 from typing import Callable, Tuple, Dict
 
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from skimage.metrics import peak_signal_noise_ratio as calc_psnr
+from skimage.metrics import structural_similarity as calc_ssim
 import torch
 from torch import nn, optim
 from torch.utils.data import Dataset, DataLoader
@@ -60,18 +62,33 @@ class AddGaussianNoise:
 class VGGPerceptualLoss(nn.Module):
     """VGG16 を用いた知覚損失。"""
 
-    def __init__(self, resize: bool = True) -> None:
+    def __init__(
+        self,
+        layers: tuple[str, ...] = ("relu1_2", "relu2_2", "relu3_3", "relu4_3"),
+        weights: Dict[str, float] | None = None,
+        resize: bool = True,
+    ) -> None:
         super().__init__()
-        vgg_features = models.vgg16(weights=models.VGG16_Weights.DEFAULT).features
-        self.vgg_layers = nn.Sequential(*list(vgg_features)).eval()
-        for param in self.vgg_layers.parameters():
-            param.requires_grad = False
-        self.layer_ids = [3, 8, 15, 22]
+        vgg = models.vgg16(weights=models.VGG16_Weights.DEFAULT).features.eval()
+        self.layers = layers
+        self.weights = weights or {l: 1.0 for l in layers}
         self.resize = resize
+        self.hooks: Dict[str, torch.utils.hooks.RemovableHandle] = {}
+        self.outputs: Dict[str, torch.Tensor] = {}
+        layer_map = {"relu1_2": 3, "relu2_2": 8, "relu3_3": 15, "relu4_3": 22}
+        for name, idx in layer_map.items():
+            if name in layers:
+                self.hooks[name] = vgg[idx].register_forward_hook(
+                    lambda _m, _i, out, key=name: self.outputs.update({key: out})
+                )
+        self.vgg = vgg
+        for p in self.vgg.parameters():
+            p.requires_grad = False
         self.mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
         self.std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        b = x.size(0)
         if x.shape[1] == 1:
             x = x.repeat(1, 3, 1, 1)
             y = y.repeat(1, 3, 1, 1)
@@ -80,17 +97,33 @@ class VGGPerceptualLoss(nn.Module):
         if self.resize:
             x = F.interpolate(x, size=(224, 224), mode="bilinear", align_corners=False)
             y = F.interpolate(y, size=(224, 224), mode="bilinear", align_corners=False)
+        self.outputs.clear()
+        _ = self.vgg(torch.cat([x, y], dim=0))
         loss = 0.0
-        cur_x = x
-        cur_y = y
-        last = 0
-        for layer_idx in self.layer_ids:
-            sub = self.vgg_layers[last:layer_idx + 1]
-            cur_x = sub(cur_x)
-            cur_y = sub(cur_y)
-            loss += F.l1_loss(cur_x, cur_y)
-            last = layer_idx + 1
+        for name in self.layers:
+            feat = self.outputs[name]
+            loss += self.weights[name] * F.l1_loss(feat[:b], feat[b:])
         return loss
+
+
+def compute_metrics(fake: torch.Tensor, real: torch.Tensor) -> Dict[str, float]:
+    """PSNR と SSIM を計算するユーティリティ関数。"""
+
+    fake_np = fake.mul(0.5).add(0.5).clamp(0, 1).cpu().numpy()
+    real_np = real.mul(0.5).add(0.5).clamp(0, 1).cpu().numpy()
+    psnr_list: list[float] = []
+    ssim_list: list[float] = []
+    for i in range(fake_np.shape[0]):
+        psnr_list.append(
+            float(calc_psnr(real_np[i, 0], fake_np[i, 0], data_range=1.0))
+        )
+        ssim_list.append(
+            float(calc_ssim(real_np[i, 0], fake_np[i, 0], data_range=1.0))
+        )
+    return {
+        "psnr": sum(psnr_list) / len(psnr_list),
+        "ssim": sum(ssim_list) / len(ssim_list),
+    }
 
 def render_char_to_png(font_path: str, char: str, out_path_or_buffer: str | io.BytesIO, size: int = 256) -> Image.Image:
     """指定したフォントで1文字を描画し PNG へ保存する。
@@ -426,16 +459,20 @@ def train(
 
     opt_G = optim.Adam(G.parameters(), lr=lr, betas=(0.5, 0.999))
     opt_D = optim.Adam(D.parameters(), lr=lr, betas=(0.5, 0.999))
+    scheduler_G = optim.lr_scheduler.CosineAnnealingLR(opt_G, T_max=epochs, eta_min=1e-6)
+    scheduler_D = optim.lr_scheduler.CosineAnnealingLR(opt_D, T_max=epochs, eta_min=1e-6)
     scaler = torch.cuda.amp.GradScaler(enabled=(use_amp and device == "cuda"))
 
     criterion_GAN = nn.BCEWithLogitsLoss()
     criterion_L1 = nn.L1Loss()
-    perceptual = PerceptualLoss(weight=perceptual_lambda).to(device) if perceptual_lambda > 0 else None
-    perceptual_loss = VGGPerceptualLoss().to(device) if use_perceptual_loss else None
+    perceptual = VGGPerceptualLoss().to(device) if use_perceptual_loss else None
 
     for epoch in range(1, epochs + 1):
         G.train()
         D.train()
+        psnr_sum = 0.0
+        ssim_sum = 0.0
+        batch_count = 0
         for src, real in dl:
             src, real = src.to(device), real.to(device)
 
@@ -458,7 +495,7 @@ def train(
                 loss_G_GAN = criterion_GAN(fake_pred_for_g, torch.ones_like(fake_pred_for_g))
                 loss_G_L1 = criterion_L1(fake, real) * l1_lambda
                 if perceptual is not None:
-                    loss_G_per = perceptual(fake, real)
+                    loss_G_per = perceptual(fake, real) * perceptual_lambda
                     loss_G = loss_G_GAN + loss_G_L1 + loss_G_per
                 else:
                     loss_G = loss_G_GAN + loss_G_L1
@@ -466,9 +503,17 @@ def train(
             scaler.step(opt_G)
             scaler.update()
 
+            metrics = compute_metrics(fake.detach(), real)
+            psnr_sum += metrics["psnr"]
+            ssim_sum += metrics["ssim"]
+            batch_count += 1
+
         print(
             f"Epoch {epoch:03d} loss_D:{loss_D.item():.4f} loss_G:{loss_G.item():.4f}"
+            f" PSNR:{psnr_sum/batch_count:.2f} SSIM:{ssim_sum/batch_count:.4f}"
         )
+        scheduler_G.step()
+        scheduler_D.step()
         if epoch % 10 == 0 or epoch == epochs:
             torch.save(G.state_dict(), os.path.join(checkpoint_dir, f"G_epoch{epoch:03d}.pth"))
             torch.save(D.state_dict(), os.path.join(checkpoint_dir, f"D_epoch{epoch:03d}.pth"))
