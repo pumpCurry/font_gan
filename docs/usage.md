@@ -20,10 +20,19 @@ python train_pix2pix.py
 
 ```python
 from train_pix2pix import stagewise_train
-stagewise_train(target_font, reference_font, all_chars, fine_tune_chars, augment=True)
+stagewise_train(
+    target_font,
+    reference_font,
+    all_chars,
+    fine_tune_chars,
+    augment=True,
+    perceptual_lambda=0.1,
+    rehearsal_ratio=0.1,
+    freeze_layers=2,
+)
 ```
 
-まず全文字で事前学習を行い、その後不足文字のみを低学習率で微調整します。`augment=True` を指定すると学習時にアフィン変換やノイズ付与が行われます。
+まず全文字で事前学習を行い、その後不足文字のみを低学習率で微調整します。`rehearsal_ratio` を指定すると既存文字の一部も混在させて忘却を防止できます。`freeze_layers` でジェネレータ前半を固定し、`perceptual_lambda` により Perceptual Loss の強さを調節します。`augment=True` を指定すると学習時にアフィン変換やノイズ付与が行われます。
 
 ## 推論
 

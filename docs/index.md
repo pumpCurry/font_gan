@@ -11,4 +11,5 @@
 - [推論手順](usage/inference.md)
 - [学習戦略](training_strategy.md)
 - [検討過程のメモ](process.md)
+- [大解像度画像利用の検討](high_resolution.md)
 
