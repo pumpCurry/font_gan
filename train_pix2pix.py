@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.15 (PR #7)
+:version: 1.0.18 (PR #9)
 :since:   1.0.15 (PR #7)
-:last-modified: 2025-06-22 12:30:00 JST+9
+:last-modified: 2025-06-22 22:03:48 JST+9
 :todo:
     - Refactor training loop for CLI usage
 """
@@ -25,6 +25,7 @@ import torch
 from torch import nn, optim
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as T
+import torchvision.models as models
 
 
 class RandomStrokeWidth:
@@ -52,6 +53,23 @@ class AddGaussianNoise:
     def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
         noise = torch.randn_like(tensor) * self.std + self.mean
         return tensor + noise
+
+
+class PerceptualLoss(nn.Module):
+    """VGG16 を利用した簡易 Perceptual Loss."""
+
+    def __init__(self, weight: float = 1.0) -> None:
+        super().__init__()
+        vgg = models.vgg16(weights=models.VGG16_Weights.DEFAULT).features[:16].eval()
+        for p in vgg.parameters():
+            p.requires_grad = False
+        self.vgg = vgg
+        self.weight = weight
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        pred_feat = self.vgg(pred.repeat(1, 3, 1, 1))
+        tgt_feat = self.vgg(target.repeat(1, 3, 1, 1))
+        return torch.nn.functional.l1_loss(pred_feat, tgt_feat) * self.weight
 
 
 def render_char_to_png(font_path: str, char: str, out_path_or_buffer: str | io.BytesIO, size: int = 256) -> Image.Image:
@@ -101,6 +119,7 @@ class FontPairDataset(Dataset):
         target_dir: str,
         transform: Callable | None = None,
         augment: bool = False,
+        augment_source_only: bool = False,
     ) -> None:
         """ディレクトリから画像ペアを読み込む。
 
@@ -112,6 +131,8 @@ class FontPairDataset(Dataset):
         :type transform: Callable | None
         :param augment: データ増強を有効にするかどうか
         :type augment: bool
+        :param augment_source_only: 参考フォントのみ増強を適用するかどうか
+        :type augment_source_only: bool
         """
         src = sorted(glob.glob(os.path.join(source_dir, "*.png")))
         tgt = []
@@ -125,22 +146,35 @@ class FontPairDataset(Dataset):
         self.src_paths = valid_src
         self.tgt_paths = [os.path.join(target_dir, os.path.basename(p)) for p in valid_src]
         if transform:
-            self.transform = transform
+            self.src_transform = transform
+            self.tgt_transform = transform
         else:
-            transforms = []
+            src_transforms: list[Callable] = []
+            tgt_transforms: list[Callable] = []
             if augment:
-                transforms.extend(
+                src_transforms.extend(
                     [
                         T.RandomAffine(degrees=2, translate=(0.02, 0.02), scale=(0.95, 1.05)),
-                        RandomStrokeWidth(radius=1, p=0.5),
+                        T.GaussianBlur(3, sigma=(0.1, 1.0)),
                     ]
                 )
-            transforms.extend([
+                if augment_source_only:
+                    src_transforms.append(RandomStrokeWidth(radius=1, p=0.5))
+                    tgt_transforms.append(RandomStrokeWidth(radius=1, p=0.1))
+                else:
+                    common_sw = RandomStrokeWidth(radius=1, p=0.5)
+                    src_transforms.append(common_sw)
+                    tgt_transforms.append(common_sw)
+            common = [
                 T.ToTensor(),
                 AddGaussianNoise(),
                 T.Normalize((0.5,), (0.5,)),
-            ])
-            self.transform = T.Compose(transforms)
+            ]
+            self.src_transform = T.Compose(src_transforms + common)
+            if augment_source_only:
+                self.tgt_transform = T.Compose(tgt_transforms + common)
+            else:
+                self.tgt_transform = T.Compose(tgt_transforms + common)
 
     def __len__(self) -> int:
         """データ数を返す。"""
@@ -155,7 +189,7 @@ class FontPairDataset(Dataset):
             tgt = Image.open(tgt_path).convert("L")
         except FileNotFoundError as exc:
             raise RuntimeError(f"Image pair not found: {src_path}, {tgt_path}") from exc
-        return self.transform(src), self.transform(tgt)
+        return self.src_transform(src), self.tgt_transform(tgt)
 
 
 class UNetGenerator(nn.Module):
@@ -231,6 +265,23 @@ class PatchDiscriminator(nn.Module):
         return self.model(x)
 
 
+def freeze_generator_layers(generator: UNetGenerator, num_layers: int) -> None:
+    """ジェネレータの最初の ``num_layers`` 層の学習を凍結する。"""
+
+    layers = [
+        generator.down1,
+        generator.down2,
+        generator.down3,
+        generator.down4,
+        generator.down5,
+        generator.down6,
+        generator.down7,
+    ]
+    for l in layers[:num_layers]:
+        for p in l.parameters():
+            p.requires_grad = False
+
+
 def train(
     target_font_path: str,
     ref_font_path: str,
@@ -245,6 +296,9 @@ def train(
     pretrained_G_path: str | None = None,
     pretrained_D_path: str | None = None,
     augment: bool = False,
+    augment_source_only: bool = False,
+    perceptual_lambda: float = 0.0,
+    freeze_layers: int = 0,
 ) -> None:
     """学習ループを実行する。
 
@@ -274,6 +328,12 @@ def train(
     :type pretrained_D_path: str | None
     :param augment: データ増強を有効にするか
     :type augment: bool
+    :param augment_source_only: 参考フォントのみ増強を適用するか
+    :type augment_source_only: bool
+    :param perceptual_lambda: Perceptual Loss の重み。0で無効
+    :type perceptual_lambda: float
+    :param freeze_layers: Stage2 で凍結するジェネレータ層数
+    :type freeze_layers: int
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(source_data_dir, exist_ok=True)
@@ -284,7 +344,12 @@ def train(
         render_char_to_png(ref_font_path, glyph, os.path.join(source_data_dir, f"{code}.png"))
         render_char_to_png(target_font_path, glyph, os.path.join(target_data_dir, f"{code}.png"))
 
-    ds = FontPairDataset(source_data_dir, target_data_dir, augment=augment)
+    ds = FontPairDataset(
+        source_data_dir,
+        target_data_dir,
+        augment=augment,
+        augment_source_only=augment_source_only,
+    )
     if len(ds) == 0:
         print("Dataset is empty")
         return
@@ -305,6 +370,8 @@ def train(
         G.load_state_dict(torch.load(pretrained_G_path, map_location=device))
     else:
         G.apply(weights_init)
+    if freeze_layers > 0:
+        freeze_generator_layers(G, freeze_layers)
 
     if pretrained_D_path and os.path.exists(pretrained_D_path):
         D.load_state_dict(torch.load(pretrained_D_path, map_location=device))
@@ -316,6 +383,7 @@ def train(
 
     criterion_GAN = nn.BCEWithLogitsLoss()
     criterion_L1 = nn.L1Loss()
+    perceptual = PerceptualLoss(weight=perceptual_lambda).to(device) if perceptual_lambda > 0 else None
 
     for epoch in range(1, epochs + 1):
         G.train()
@@ -338,7 +406,11 @@ def train(
             fake_pred_for_g = D(src, fake)
             loss_G_GAN = criterion_GAN(fake_pred_for_g, torch.ones_like(fake_pred_for_g))
             loss_G_L1 = criterion_L1(fake, real) * l1_lambda
-            loss_G = loss_G_GAN + loss_G_L1
+            if perceptual is not None:
+                loss_G_per = perceptual(fake, real)
+                loss_G = loss_G_GAN + loss_G_L1 + loss_G_per
+            else:
+                loss_G = loss_G_GAN + loss_G_L1
             loss_G.backward()
             opt_G.step()
 
@@ -404,9 +476,17 @@ def stagewise_train(
     stage1_lr: float = 2e-4,
     stage2_lr: float = 1e-5,
     checkpoint_dir: str = "checkpoints",
+    rehearsal_ratio: float = 0.0,
+    freeze_layers: int = 0,
     **kwargs,
 ) -> None:
-    """事前学習と微調整を続けて行うヘルパー関数。"""
+    """事前学習と微調整を続けて行うヘルパー関数。
+
+    :param rehearsal_ratio: Stage2 で混合する既存文字の割合
+    :type rehearsal_ratio: float
+    :param freeze_layers: Stage2 学習で凍結するジェネレータ層数
+    :type freeze_layers: int
+    """
 
     train(
         target_font_path=target_font_path,
@@ -423,6 +503,11 @@ def stagewise_train(
 
     g_ckpt = os.path.join(checkpoint_dir, f"G_epoch{stage1_epochs:03d}.pth")
     d_ckpt = os.path.join(checkpoint_dir, f"D_epoch{stage1_epochs:03d}.pth")
+    if rehearsal_ratio > 0:
+        rehearse_n = max(1, int(len(all_chars) * rehearsal_ratio))
+        rehearse_chars = dict(random.sample(list(all_chars.items()), rehearse_n))
+        fine_tune_chars = {**fine_tune_chars, **rehearse_chars}
+
     train(
         target_font_path=target_font_path,
         ref_font_path=ref_font_path,
@@ -432,6 +517,8 @@ def stagewise_train(
         checkpoint_dir=checkpoint_dir,
         pretrained_G_path=g_ckpt,
         pretrained_D_path=d_ckpt,
+        augment_source_only=True,
+        freeze_layers=freeze_layers,
         **kwargs,
     )
 
@@ -476,6 +563,9 @@ if __name__ == "__main__":
         source_data_dir=os.path.join(OUTPUT_DIR_TRAIN, "train", "source"),
         target_data_dir=os.path.join(OUTPUT_DIR_TRAIN, "train", "target"),
         augment=True,
+        rehearsal_ratio=0.1,
+        freeze_layers=2,
+        perceptual_lambda=0.1,
     )
 
     latest_checkpoint = os.path.join(CHECKPOINT_DIR, f"G_epoch{NUM_EPOCHS+50:03d}.pth")
