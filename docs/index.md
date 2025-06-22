@@ -16,4 +16,5 @@
 - [大解像度画像利用の検討](high_resolution.md)
 - [コード概要](code_overview.md)
 - [実装の概要](technical_details.md)
+- [学習文字リストの管理](character_list.md)
 
