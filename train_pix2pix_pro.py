@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.41 (PR #18)
+:version: 1.0.43 (PR #19)
 :since:   1.0.30 (PR #14)
-:last-modified: 2025-06-23 06:30:00 JST+9
+:last-modified: 2025-06-23 05:59:54 JST+9
 :todo:
     - Improve configurability via YAML
 """
@@ -19,6 +19,7 @@ import glob
 import random
 import io
 import argparse
+import pprint
 
 
 from PIL import Image, ImageDraw, ImageFont
@@ -37,6 +38,16 @@ from tqdm import tqdm
 from skimage.metrics import peak_signal_noise_ratio as calc_psnr
 from skimage.metrics import structural_similarity as calc_ssim
 from scipy.ndimage import binary_dilation, binary_erosion
+
+
+def set_seed(seed: int = 2025) -> None:
+    """Set random seed for reproducible results."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def load_char_list_from_file(path: str) -> dict[int, str]:
@@ -371,7 +382,9 @@ class PatchDiscriminator(nn.Module):
 def train(config: dict) -> None:
     """Run pix2pix training with the provided configuration."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    set_seed(config.get("seed", 2025))
     writer = SummaryWriter(log_dir=os.path.join(config["checkpoint_dir"], "logs"))
+    writer.add_text("Config", pprint.pformat(config))
     os.makedirs(config["source_data_dir"], exist_ok=True)
     os.makedirs(config["target_data_dir"], exist_ok=True)
     char_map = build_learning_char_map(
