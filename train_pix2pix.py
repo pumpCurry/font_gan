@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.23 (PR #10)
+:version: 1.0.26 (PR #11)
 :since:   1.0.15 (PR #7)
-:last-modified: 2025-06-24 00:00:00 JST+9
+:last-modified: 2025-06-22 23:28:26 JST+9
 
 :todo:
     - Refactor training loop for CLI usage
@@ -24,6 +24,8 @@ from typing import Callable, Tuple, Dict
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from skimage.metrics import peak_signal_noise_ratio as calc_psnr
 from skimage.metrics import structural_similarity as calc_ssim
+import numpy as np
+from scipy.ndimage import binary_dilation, binary_erosion
 import torch
 from torch import nn, optim
 from torch.utils.data import Dataset, DataLoader
@@ -57,6 +59,29 @@ class AddGaussianNoise:
     def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
         noise = torch.randn_like(tensor) * self.std + self.mean
         return tensor + noise
+
+
+def morphology_shift(img: Image.Image, min_shift: int = 1, max_shift: int = 2) -> Image.Image:
+    """Apply small dilation or erosion to change stroke width."""
+    img_np = np.array(img)
+    threshold = 200
+    binary = img_np < threshold
+    shift = random.randint(min_shift, max_shift)
+    if random.random() > 0.5:
+        processed = binary_dilation(binary, iterations=shift)
+    else:
+        processed = binary_erosion(binary, iterations=shift)
+    final_np = np.where(processed, 0, 255).astype(np.uint8)
+    return Image.fromarray(final_np)
+
+
+def get_norm_layer(norm_type: str = "batch") -> type[nn.Module]:
+    """Return normalization layer class based on type."""
+    if norm_type == "batch":
+        return nn.BatchNorm2d
+    if norm_type == "instance":
+        return nn.InstanceNorm2d
+    raise NotImplementedError(f"norm layer {norm_type} not supported")
 
 
 class VGGPerceptualLoss(nn.Module):
@@ -222,15 +247,21 @@ class FontPairDataset(Dataset):
                     [
                         T.RandomAffine(degrees=2, translate=(0.02, 0.02), scale=(0.95, 1.05)),
                         T.GaussianBlur(3, sigma=(0.1, 1.0)),
+                        T.RandomApply([T.Lambda(lambda img: morphology_shift(img, 1, 1))], p=0.2),
                     ]
                 )
                 if augment_source_only:
                     src_transforms.append(RandomStrokeWidth(radius=1, p=0.5))
-                    tgt_transforms.append(RandomStrokeWidth(radius=1, p=0.1))
+                    tgt_transforms.append(
+                        T.RandomApply([T.Lambda(lambda img: morphology_shift(img, 1, 1))], p=0.1)
+                    )
                 else:
                     common_sw = RandomStrokeWidth(radius=1, p=0.5)
                     src_transforms.append(common_sw)
                     tgt_transforms.append(common_sw)
+                    tgt_transforms.append(
+                        T.RandomApply([T.Lambda(lambda img: morphology_shift(img, 1, 1))], p=0.1)
+                    )
             common = [
                 T.ToTensor(),
                 AddGaussianNoise(),
@@ -265,22 +296,42 @@ class FontPairDataset(Dataset):
 class UNetGenerator(nn.Module):
     """U-Net 形式のジェネレータ。"""
 
-    def __init__(self, in_ch: int = 1, out_ch: int = 1, ngf: int = 64, num_downs: int = 8) -> None:
+    def __init__(
+        self,
+        in_ch: int = 1,
+        out_ch: int = 1,
+        ngf: int = 64,
+        num_downs: int = 8,
+        norm_type: str = "batch",
+    ) -> None:
         super().__init__()
+        norm_layer = get_norm_layer(norm_type)
         downs: list[nn.Module] = []
         ch = ngf
         downs.append(nn.Sequential(nn.Conv2d(in_ch, ch, 4, 2, 1, bias=False), nn.LeakyReLU(0.2)))
         for i in range(1, num_downs):
             in_c = ch
             ch = min(ngf * 2 ** i, ngf * 8)
-            downs.append(nn.Sequential(nn.Conv2d(in_c, ch, 4, 2, 1, bias=False), nn.BatchNorm2d(ch), nn.LeakyReLU(0.2)))
+            downs.append(
+                nn.Sequential(
+                    nn.Conv2d(in_c, ch, 4, 2, 1, bias=False),
+                    norm_layer(ch),
+                    nn.LeakyReLU(0.2),
+                )
+            )
         self.downs = nn.ModuleList(downs)
 
         ups: list[nn.Module] = []
         for i in range(num_downs - 1):
             in_c = ch * 2 if i != 0 else ch
             ch = min(max(in_c // 2, ngf), ngf * 8) if i < num_downs - 2 else ngf
-            ups.append(nn.Sequential(nn.ConvTranspose2d(in_c, ch, 4, 2, 1, bias=False), nn.BatchNorm2d(ch), nn.ReLU(True)))
+            ups.append(
+                nn.Sequential(
+                    nn.ConvTranspose2d(in_c, ch, 4, 2, 1, bias=False),
+                    norm_layer(ch),
+                    nn.ReLU(True),
+                )
+            )
         ups.append(nn.Sequential(nn.ConvTranspose2d(ch * 2, out_ch, 4, 2, 1), nn.Tanh()))
         self.ups = nn.ModuleList(ups)
 
@@ -300,8 +351,15 @@ class UNetGenerator(nn.Module):
 class PatchDiscriminator(nn.Module):
     """PatchGAN 識別器。"""
 
-    def __init__(self, in_ch: int = 2, ndf: int = 64, n_layers: int = 3) -> None:
+    def __init__(
+        self,
+        in_ch: int = 2,
+        ndf: int = 64,
+        n_layers: int = 3,
+        norm_type: str = "batch",
+    ) -> None:
         super().__init__()
+        norm_layer = get_norm_layer(norm_type)
         layers = [nn.Conv2d(in_ch, ndf, 4, 2, 1), nn.LeakyReLU(0.2, inplace=True)]
         nf_mult = 1
         for n in range(1, n_layers):
@@ -309,14 +367,14 @@ class PatchDiscriminator(nn.Module):
             nf_mult = min(2 ** n, 8)
             layers += [
                 nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, 4, 2, 1, bias=False),
-                nn.BatchNorm2d(ndf * nf_mult),
+                norm_layer(ndf * nf_mult),
                 nn.LeakyReLU(0.2, inplace=True),
             ]
         nf_mult_prev = nf_mult
         nf_mult = min(2 ** n_layers, 8)
         layers += [
             nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, 4, 1, 1, bias=False),
-            nn.BatchNorm2d(ndf * nf_mult),
+            norm_layer(ndf * nf_mult),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv2d(ndf * nf_mult, 1, 4, 1, 1),
         ]
@@ -358,6 +416,7 @@ def train(
     augment: bool = False,
     augment_source_only: bool = False,
     freeze_layers: int = 0,
+    norm_type: str = "batch",
 ) -> None:
     """学習ループを実行する。
 
@@ -401,6 +460,8 @@ def train(
     :type augment_source_only: bool
     :param freeze_layers: Stage2 で凍結するジェネレータ層数
     :type freeze_layers: int
+    :param norm_type: 正規化レイヤー種別 ("batch" or "instance")
+    :type norm_type: str
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(source_data_dir, exist_ok=True)
@@ -433,9 +494,9 @@ def train(
         return
     dl = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=max(os.cpu_count() // 2, 1), pin_memory=True)
 
-    G = UNetGenerator(num_downs=num_downs).to(device)
+    G = UNetGenerator(num_downs=num_downs, norm_type=norm_type).to(device)
     d_layers = 3 if img_size <= 256 else 4
-    D = PatchDiscriminator(n_layers=d_layers).to(device)
+    D = PatchDiscriminator(n_layers=d_layers, norm_type=norm_type).to(device)
 
     def weights_init(m: nn.Module) -> None:
         classname = m.__class__.__name__
@@ -599,6 +660,7 @@ def stagewise_train(
     stage2_img_size: int | None = None,
     stage1_num_downs: int = 8,
     stage2_num_downs: int | None = None,
+    norm_type: str = "batch",
     **kwargs,
 ) -> None:
     """事前学習と微調整を続けて行うヘルパー関数。
@@ -615,6 +677,8 @@ def stagewise_train(
     :type stage1_num_downs: int
     :param stage2_num_downs: Stage2 のU-Netダウンサンプル回数
     :type stage2_num_downs: int | None
+    :param norm_type: 正規化レイヤー種別
+    :type norm_type: str
     """
 
     train(
@@ -626,6 +690,7 @@ def stagewise_train(
         checkpoint_dir=checkpoint_dir,
         img_size=stage1_img_size,
         num_downs=stage1_num_downs,
+        norm_type=kwargs.get("norm_type", "batch"),
         **kwargs,
     )
 
@@ -652,6 +717,7 @@ def stagewise_train(
         freeze_layers=freeze_layers,
         img_size=stage2_img_size or stage1_img_size,
         num_downs=stage2_num_downs or stage1_num_downs,
+        norm_type=kwargs.get("norm_type", "batch"),
         **kwargs,
     )
 

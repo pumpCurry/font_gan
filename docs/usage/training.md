@@ -30,8 +30,10 @@ stagewise_train(
     perceptual_lambda=0.1,
     rehearsal_ratio=0.1,
     freeze_layers=2,
+    norm_type="instance",
 )
 ```
 
 最初に全文字で学習した後、指定文字のみを低学習率で微調整します。`rehearsal_ratio` を指定すると既存文字の一部も混在させ、忘却を防ぎます。`freeze_layers` でジェネレータの前半層を固定でき、`perceptual_lambda` を設定すると Perceptual Loss が有効になります。`augment=True` を指定するとアフィン変換やノイズ付与などの前処理が行われます。
+`norm_type` には `batch` と `instance` が選択でき、スタイル転送用途では InstanceNorm を推奨します。
 
