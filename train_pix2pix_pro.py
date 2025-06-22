@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.30 (PR #14)
+:version: 1.0.35 (PR #15)
 :since:   1.0.30 (PR #14)
-:last-modified: 2025-06-22 15:26:00 JST+9
+:last-modified: 2025-06-23 05:27:03 JST+9
 :todo:
     - Improve configurability via YAML
 """
@@ -17,7 +17,6 @@
 import os
 import glob
 import random
-import time
 import io
 
 from PIL import Image, ImageDraw, ImageFont
@@ -374,8 +373,8 @@ if __name__ == "__main__":
         "checkpoint_dir": "./checkpoints/gd_highway_pro",
         "source_data_dir": "./data/train_s1/source",
         "target_data_dir": "./data/train_s1/target",
-        "ref_font_path": "path/to/reference_font.otf",
-        "target_font_path": "path/to/GD-HighwayGothicJA.otf",
+        "ref_font_path": "fonts/reference_font.otf",
+        "target_font_path": "fonts/GD-HighwayGothicJA.otf",
         "common_chars_for_stage1": common_chars,
         "specific_chars_for_stage2": specific_chars,
     }
