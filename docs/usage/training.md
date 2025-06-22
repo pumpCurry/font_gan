@@ -46,3 +46,13 @@ stagewise_train(
 python -c "from train_pix2pix import train_from_config; train_from_config('conf.yaml')"
 ```
 
+
+## 自動2段階学習スクリプト
+
+`train_pix2pix_pro.py` を実行すると、256px での事前学習と 512px での微調整を連続で行えます。
+フォントパスや文字セットを設定した上で以下のように実行してください。
+
+```bash
+python train_pix2pix_pro.py
+```
+

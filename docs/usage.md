@@ -34,6 +34,7 @@ stagewise_train(
 
 まず全文字で事前学習を行い、その後不足文字のみを低学習率で微調整します。`rehearsal_ratio` を指定すると既存文字の一部も混在させて忘却を防止できます。`freeze_layers` でジェネレータ前半を固定し、`perceptual_lambda` により Perceptual Loss の強さを調節します。`augment=True` を指定すると学習時にアフィン変換やノイズ付与が行われます。
 
+より簡単に2段階学習を行う場合は `train_pix2pix_pro.py` を実行してください。
 ## 推論
 
 ```python
