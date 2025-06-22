@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.39 (PR #17)
+:version: 1.0.41 (PR #18)
 :since:   1.0.30 (PR #14)
-:last-modified: 2025-06-23 06:00:00 JST+9
+:last-modified: 2025-06-23 06:30:00 JST+9
 :todo:
     - Improve configurability via YAML
 """
@@ -18,6 +18,8 @@ import os
 import glob
 import random
 import io
+import argparse
+
 
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
@@ -30,6 +32,8 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import torchvision.transforms as T
 import torchvision.models as models
+import torchvision.utils as vutils
+from tqdm import tqdm
 from skimage.metrics import peak_signal_noise_ratio as calc_psnr
 from skimage.metrics import structural_similarity as calc_ssim
 from scipy.ndimage import binary_dilation, binary_erosion
@@ -219,9 +223,38 @@ def morphology_transform(img: Image.Image, min_shift: int = 1, max_shift: int = 
 class FontPairDataset(Dataset):
     """Provide paired font images as ``torch.utils.data.Dataset``."""
 
-    def __init__(self, source_dir: str, target_dir: str, transform_source_pil: callable | None = None, transform_target_pil: callable | None = None, img_size: int = 256) -> None:
-        self.src = sorted(glob.glob(os.path.join(source_dir, "*.png")))
-        self.tgt = [os.path.join(target_dir, os.path.basename(p)) for p in self.src]
+    def __init__(
+        self,
+        source_dir: str,
+        target_dir: str,
+        transform_source_pil: callable | None = None,
+        transform_target_pil: callable | None = None,
+        img_size: int = 256,
+        is_stage2: bool = False,
+        rehearsal_ratio: float = 0.0,
+        rehearsal_source_dir: str | None = None,
+        rehearsal_target_dir: str | None = None,
+    ) -> None:
+        self.src_paths = sorted(glob.glob(os.path.join(source_dir, "*.png")))
+        self.tgt_paths = [os.path.join(target_dir, os.path.basename(p)) for p in self.src_paths]
+
+        if (
+            is_stage2
+            and rehearsal_ratio > 0
+            and rehearsal_source_dir
+            and rehearsal_target_dir
+        ):
+            print(f"[Info] Applying Rehearsal Strategy with ratio: {rehearsal_ratio}")
+            num_rehearsal = int(len(self.src_paths) * rehearsal_ratio)
+            rehearsal_candidates = sorted(glob.glob(os.path.join(rehearsal_source_dir, "*.png")))
+            if rehearsal_candidates:
+                chosen = random.sample(rehearsal_candidates, min(num_rehearsal, len(rehearsal_candidates)))
+                self.src_paths.extend(chosen)
+                self.tgt_paths.extend(
+                    [os.path.join(rehearsal_target_dir, os.path.basename(p)) for p in chosen]
+                )
+                print(f"  Added {len(chosen)} rehearsal samples. Total samples: {len(self.src_paths)}")
+
         self.tsf_s = transform_source_pil
         self.tsf_t = transform_target_pil
         self.to_tensor = T.ToTensor()
@@ -229,11 +262,11 @@ class FontPairDataset(Dataset):
         self.img_size = img_size
 
     def __len__(self) -> int:
-        return len(self.src)
+        return len(self.src_paths)
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
-        s = Image.open(self.src[index]).convert("L")
-        t = Image.open(self.tgt[index]).convert("L")
+        s = Image.open(self.src_paths[index]).convert("L")
+        t = Image.open(self.tgt_paths[index]).convert("L")
         if s.size != (self.img_size, self.img_size):
             s = s.resize((self.img_size, self.img_size), Image.BICUBIC)
         if t.size != (self.img_size, self.img_size):
@@ -357,15 +390,18 @@ def train(config: dict) -> None:
     D = PatchDiscriminator(n_layers=config["d_n_layers"], norm_type=config["norm_type"]).to(device)
     if config.get("load_G_path"):
         G.load_state_dict(torch.load(config["load_G_path"], map_location=device))
+    else:
+        G.apply(weights_init)
+
     if config.get("load_D_path"):
         D.load_state_dict(torch.load(config["load_D_path"], map_location=device))
+    else:
+        D.apply(weights_init)
     if config.get("freeze_G_layers", 0) > 0:
         for i, layer in enumerate(G.model.children()):
             if i < config["freeze_G_layers"]:
                 for p in layer.parameters():
                     p.requires_grad = False
-    G.apply(weights_init)
-    D.apply(weights_init)
     cgan = nn.BCEWithLogitsLoss()
     cl1 = nn.L1Loss()
     cperc = VGGPerceptualLoss().to(device)
@@ -378,7 +414,8 @@ def train(config: dict) -> None:
     for epoch in range(1, config["epochs"] + 1):
         G.train()
         D.train()
-        for i, (src, real) in enumerate(dl):
+        pbar = tqdm(dl, desc=f"Epoch {epoch}/{config['epochs']}")
+        for i, (src, real) in enumerate(pbar):
             src, real = src.to(device), real.to(device)
             opt_g.zero_grad()
             with torch.cuda.amp.autocast(enabled=config["use_amp"]):
@@ -404,9 +441,13 @@ def train(config: dict) -> None:
                 opt_d.zero_grad()
             if step % config["log_freq"] == 0:
                 mets = compute_metrics(fake, real)
-                print(
-                    f"Epoch[{epoch}/{config['epochs']}] Step {step} L_D:{l_d.item()*config['accum_steps']:.4f} "
-                    f"L_G:{(l_gan + l_l1 + l_p).item():.4f} PSNR:{mets['psnr']:.2f} SSIM:{mets['ssim']:.3f}"
+                pbar.set_postfix(
+                    {
+                        "L_D": f"{l_d.item()*config['accum_steps']:.3f}",
+                        "L_G": f"{(l_gan + l_l1 + l_p).item():.3f}",
+                        "PSNR": f"{mets['psnr']:.2f}",
+                        "SSIM": f"{mets['ssim']:.3f}",
+                    }
                 )
                 writer.add_scalar("Loss/D", l_d.item() * config["accum_steps"], step)
                 writer.add_scalar("Loss/G_GAN", l_gan.item(), step)
@@ -417,83 +458,149 @@ def train(config: dict) -> None:
             step += 1
         sched_g.step()
         sched_d.step()
-        if epoch % config["save_epoch_freq"] == 0:
-            torch.save(G.state_dict(), os.path.join(config["checkpoint_dir"], f"G_{config['stage_name']}_ep{epoch}.pth"))
-            torch.save(D.state_dict(), os.path.join(config["checkpoint_dir"], f"D_{config['stage_name']}_ep{epoch}.pth"))
+
+        if epoch % config["save_epoch_freq"] == 0 or epoch == config["epochs"]:
+            G.eval()
+            with torch.no_grad():
+                val_src, val_real = next(iter(dl))
+                val_src, val_real = val_src.to(device), val_real.to(device)
+                val_fake = G(val_src)
+                grid = vutils.make_grid(
+                    torch.cat([
+                        val_src.add(1).div(2),
+                        val_fake.add(1).div(2),
+                        val_real.add(1).div(2),
+                    ]),
+                    nrow=val_src.size(0),
+                )
+                writer.add_image("Comparison (Source-Fake-Real)", grid, epoch)
+
+            torch.save(
+                G.state_dict(),
+                os.path.join(
+                    config["checkpoint_dir"], f"G_{config['stage_name']}_ep{epoch}.pth"
+                ),
+            )
+            torch.save(
+                D.state_dict(),
+                os.path.join(
+                    config["checkpoint_dir"], f"D_{config['stage_name']}_ep{epoch}.pth"
+                ),
+            )
     writer.close()
 
 
-if __name__ == "__main__":
-    all_candidate_chars = {
-        ord(c): c
-        for c in (
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-            "abcdefghijklmnopqrstuvwxyz"
-            "0123456789"
-            "あいうえおかきくけこさしすせそ"
-            "たちつてと"
-            "なにぬねのはひふへほ"
-            "まみむめもやゆよらりるれろわをん"
-            "道高速路"
+def main() -> None:
+    """Parse command line arguments and execute training."""
+    parser = argparse.ArgumentParser(description="Advanced Font Generation")
+    parser.add_argument(
+        "--stage",
+        type=str,
+        required=True,
+        choices=["s1_256", "s2_512"],
+        help="Training stage to run.",
+    )
+    parser.add_argument("--ref_font", type=str, required=True, help="Reference font path")
+    parser.add_argument("--target_font", type=str, required=True, help="Target font path")
+    parser.add_argument("--char_list", type=str, default=None, help="External character list")
+    parser.add_argument(
+        "--candidate_char_file",
+        type=str,
+        default=None,
+        help="Candidate character file for auto detection",
+    )
+    parser.add_argument(
+        "--data_dir_root",
+        type=str,
+        default="./data",
+        help="Root directory for training images",
+    )
+    parser.add_argument(
+        "--checkpoint_dir",
+        type=str,
+        default="./checkpoints/gd_highway_pro",
+        help="Directory to save checkpoints",
+    )
+    parser.add_argument("--batch_size", type=int, default=None, help="Batch size override")
+
+    args = parser.parse_args()
+
+    if args.candidate_char_file and os.path.exists(args.candidate_char_file):
+        candidate_chars = load_char_list_from_file(args.candidate_char_file)
+    else:
+        candidate_chars = {
+            ord(c): c
+            for c in (
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                "abcdefghijklmnopqrstuvwxyz"
+                "0123456789"
+                "あいうえおかきくけこさしすせそ"
+                "たちつてと"
+                "なにぬねのはひふへほ"
+                "まみむめもやゆよらりるれろわをん"
+                "道高速路"
+            )
+        }
+
+    base_config = {
+        "norm_type": "instance",
+        "l1_lambda": 100.0,
+        "perceptual_lambda": 1.0,
+        "use_amp": True,
+        "log_freq": 100,
+        "save_epoch_freq": 10,
+        "ref_font_path": args.ref_font,
+        "target_font_path": args.target_font,
+        "candidate_chars": candidate_chars,
+        "learning_list_file": args.char_list,
+        "checkpoint_dir": args.checkpoint_dir,
+    }
+
+    if args.stage == "s1_256":
+        config = base_config.copy()
+        config.update(
+            {
+                "stage_name": "pretrain_256",
+                "img_size": 256,
+                "num_unet_downs": 8,
+                "d_n_layers": 3,
+                "epochs": 150,
+                "batch_size": args.batch_size or 8,
+                "lr_G": 2e-4,
+                "lr_D": 2e-4,
+                "accum_steps": 2,
+                "source_data_dir": os.path.join(args.data_dir_root, "train_s1/source"),
+                "target_data_dir": os.path.join(args.data_dir_root, "train_s1/target"),
+            }
         )
-    }
+        train(config)
+    else:
+        last_epoch_s1 = 150
+        config = base_config.copy()
+        config.update(
+            {
+                "stage_name": "progressive_512",
+                "img_size": 512,
+                "num_unet_downs": 9,
+                "d_n_layers": 4,
+                "epochs": 100,
+                "batch_size": args.batch_size or 2,
+                "lr_G": 1e-4,
+                "lr_D": 1e-4,
+                "accum_steps": 8,
+                "source_data_dir": os.path.join(args.data_dir_root, "train_s2/source"),
+                "target_data_dir": os.path.join(args.data_dir_root, "train_s2/target"),
+                "load_G_path": os.path.join(
+                    args.checkpoint_dir, f"G_pretrain_256_ep{last_epoch_s1}.pth"
+                ),
+                "freeze_G_layers": 2,
+                "rehearsal_ratio": 0.1,
+                "rehearsal_source_dir": os.path.join(args.data_dir_root, "train_s1/source"),
+                "rehearsal_target_dir": os.path.join(args.data_dir_root, "train_s1/target"),
+            }
+        )
+        train(config)
 
-    learning_list_file = "./learning_list.txt"
 
-    config_stage1 = {
-        "stage_name": "pretrain_256",
-        "img_size": 256,
-        "num_unet_downs": 8,
-        "d_n_layers": 3,
-        "norm_type": "instance",
-        "epochs": 150,
-        "batch_size": 8,
-        "lr_G": 2e-4,
-        "lr_D": 2e-4,
-        "l1_lambda": 100.0,
-        "perceptual_lambda": 1.0,
-        "use_amp": True,
-        "accum_steps": 2,
-        "log_freq": 200,
-        "save_epoch_freq": 10,
-        "checkpoint_dir": "./checkpoints/gd_highway_pro",
-        "source_data_dir": "./data/train_s1/source",
-        "target_data_dir": "./data/train_s1/target",
-        "ref_font_path": "./fonts/reference_font.otf",
-        "target_font_path": "./fonts/GD-HighwayGothicJA.otf",
-        "candidate_chars": all_candidate_chars,
-        "learning_list_file": learning_list_file,
-        "common_chars_for_stage1": all_candidate_chars,
-        "specific_chars_for_stage2": {},
-    }
-
-    train(config_stage1)
-
-    config_stage2 = {
-        "stage_name": "progressive_512",
-        "img_size": 512,
-        "num_unet_downs": 9,
-        "d_n_layers": 4,
-        "norm_type": "instance",
-        "epochs": 100,
-        "batch_size": 2,
-        "lr_G": 1e-4,
-        "lr_D": 1e-4,
-        "l1_lambda": 100.0,
-        "perceptual_lambda": 1.0,
-        "use_amp": True,
-        "accum_steps": 4,
-        "log_freq": 200,
-        "save_epoch_freq": 10,
-        "checkpoint_dir": "./checkpoints/gd_highway_pro",
-        "source_data_dir": "./data/train_s2/source",
-        "target_data_dir": "./data/train_s2/target",
-        "ref_font_path": "./fonts/reference_font.otf",
-        "target_font_path": "./fonts/GD-HighwayGothicJA.otf",
-        "candidate_chars": all_candidate_chars,
-        "learning_list_file": learning_list_file,
-        "load_G_path": "./checkpoints/gd_highway_pro/G_pretrain_256_ep150.pth",
-        "freeze_G_layers": 2,
-    }
-
-    train(config_stage2)
+if __name__ == "__main__":
+    main()
