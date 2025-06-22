@@ -17,4 +17,5 @@
 - [コード概要](code_overview.md)
 - [実装の概要](technical_details.md)
 - [学習文字リストの管理](character_list.md)
+- [実験再現性とデバッグ](reproducibility.md)
 
