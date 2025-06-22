@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.35 (PR #15)
+:version: 1.0.39 (PR #17)
 :since:   1.0.30 (PR #14)
-:last-modified: 2025-06-23 05:27:03 JST+9
+:last-modified: 2025-06-23 06:00:00 JST+9
 :todo:
     - Improve configurability via YAML
 """
@@ -33,6 +33,74 @@ import torchvision.models as models
 from skimage.metrics import peak_signal_noise_ratio as calc_psnr
 from skimage.metrics import structural_similarity as calc_ssim
 from scipy.ndimage import binary_dilation, binary_erosion
+
+
+def load_char_list_from_file(path: str) -> dict[int, str]:
+    """Load learning characters from a text file.
+
+    Each line may contain a single character or a code point in the form
+    ``U+XXXX``.
+
+    Args:
+        path: File path to read.
+
+    Returns:
+        Mapping from code point to character.
+    """
+    chars: dict[int, str] = {}
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            if line.upper().startswith("U+"):
+                try:
+                    code = int(line[2:], 16)
+                    chars[code] = chr(code)
+                except Exception:
+                    continue
+            else:
+                ch = line[0]
+                chars[ord(ch)] = ch
+    return chars
+
+
+def is_blank_glyph(font_path: str, char: str, size: int = 256, threshold: int = 250) -> bool:
+    """Return ``True`` if the font renders ``char`` as almost blank."""
+    font = ImageFont.truetype(font_path, int(size * 0.8))
+    img = Image.new("L", (size, size), color=255)
+    draw = ImageDraw.Draw(img)
+    try:
+        bbox = draw.textbbox((0, 0), char, font=font)
+        w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        x = (size - w) / 2 - bbox[0]
+        y = (size - h) / 2 - bbox[1]
+    except AttributeError:
+        w, h = draw.textsize(char, font=font)
+        ascent, _ = font.getmetrics()
+        x = (size - w) / 2
+        y = (size - ascent) / 2
+    draw.text((x, y), char, font=font, fill=0)
+    arr = np.array(img)
+    return float(np.mean(arr)) > threshold
+
+
+def build_learning_char_map(font_path: str, candidate_chars: dict[int, str], external_list_path: str | None = None) -> dict[int, str]:
+    """Return learning characters using file or auto detection."""
+    if external_list_path and os.path.exists(external_list_path):
+        print(f"[Info] Learning list file found: {external_list_path}")
+        return load_char_list_from_file(external_list_path)
+
+    print(f"[Info] No external list. Auto-detecting from OTF (font: {font_path}) ...")
+    learning: dict[int, str] = {}
+    for code, ch in candidate_chars.items():
+        try:
+            if not is_blank_glyph(font_path, ch, size=256):
+                learning[code] = ch
+        except Exception as exc:
+            print(f"  [Warning] Could not render U+{code:04X}: {exc}")
+    print(f"[Info] Auto-detect done. {len(learning)}/{len(candidate_chars)} characters selected.")
+    return learning
 
 
 def render_char_to_png(font_path: str, char: str, out_path_or_buffer: str | io.BytesIO, size: int = 256) -> Image.Image:
@@ -273,7 +341,11 @@ def train(config: dict) -> None:
     writer = SummaryWriter(log_dir=os.path.join(config["checkpoint_dir"], "logs"))
     os.makedirs(config["source_data_dir"], exist_ok=True)
     os.makedirs(config["target_data_dir"], exist_ok=True)
-    char_map = config["common_chars_for_stage1"] if "256" in config["stage_name"] else config["specific_chars_for_stage2"]
+    char_map = build_learning_char_map(
+        font_path=config["target_font_path"],
+        candidate_chars=config["candidate_chars"],
+        external_list_path=config.get("learning_list_file"),
+    )
     for code, glyph in char_map.items():
         render_char_to_png(config["ref_font_path"], glyph, os.path.join(config["source_data_dir"], f"{code}.png"), size=config["img_size"])
         render_char_to_png(config["target_font_path"], glyph, os.path.join(config["target_data_dir"], f"{code}.png"), size=config["img_size"])
@@ -352,9 +424,23 @@ def train(config: dict) -> None:
 
 
 if __name__ == "__main__":
-    common_chars = {ord(c): c for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをん道高速路"}
-    specific_chars = {ord("壱"): "壱", ord("弐"): "弐", ord("参"): "参"}
-    config1 = {
+    all_candidate_chars = {
+        ord(c): c
+        for c in (
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            "abcdefghijklmnopqrstuvwxyz"
+            "0123456789"
+            "あいうえおかきくけこさしすせそ"
+            "たちつてと"
+            "なにぬねのはひふへほ"
+            "まみむめもやゆよらりるれろわをん"
+            "道高速路"
+        )
+    }
+
+    learning_list_file = "./learning_list.txt"
+
+    config_stage1 = {
         "stage_name": "pretrain_256",
         "img_size": 256,
         "num_unet_downs": 8,
@@ -373,29 +459,41 @@ if __name__ == "__main__":
         "checkpoint_dir": "./checkpoints/gd_highway_pro",
         "source_data_dir": "./data/train_s1/source",
         "target_data_dir": "./data/train_s1/target",
-        "ref_font_path": "fonts/reference_font.otf",
-        "target_font_path": "fonts/GD-HighwayGothicJA.otf",
-        "common_chars_for_stage1": common_chars,
-        "specific_chars_for_stage2": specific_chars,
+        "ref_font_path": "./fonts/reference_font.otf",
+        "target_font_path": "./fonts/GD-HighwayGothicJA.otf",
+        "candidate_chars": all_candidate_chars,
+        "learning_list_file": learning_list_file,
+        "common_chars_for_stage1": all_candidate_chars,
+        "specific_chars_for_stage2": {},
     }
-    train(config1)
-    config2 = config1.copy()
-    config2.update(
-        {
-            "stage_name": "progressive_512",
-            "img_size": 512,
-            "num_unet_downs": 9,
-            "d_n_layers": 4,
-            "epochs": 100,
-            "batch_size": 2,
-            "accum_steps": 4,
-            "lr_G": 1e-4,
-            "lr_D": 1e-4,
-            "source_data_dir": "./data/train_s2/source",
-            "target_data_dir": "./data/train_s2/target",
-            "load_G_path": "./checkpoints/gd_highway_pro/G_pretrain_256_ep150.pth",
-            "freeze_G_layers": 2,
-            "specific_chars_for_stage2": common_chars,
-        }
-    )
-    train(config2)
+
+    train(config_stage1)
+
+    config_stage2 = {
+        "stage_name": "progressive_512",
+        "img_size": 512,
+        "num_unet_downs": 9,
+        "d_n_layers": 4,
+        "norm_type": "instance",
+        "epochs": 100,
+        "batch_size": 2,
+        "lr_G": 1e-4,
+        "lr_D": 1e-4,
+        "l1_lambda": 100.0,
+        "perceptual_lambda": 1.0,
+        "use_amp": True,
+        "accum_steps": 4,
+        "log_freq": 200,
+        "save_epoch_freq": 10,
+        "checkpoint_dir": "./checkpoints/gd_highway_pro",
+        "source_data_dir": "./data/train_s2/source",
+        "target_data_dir": "./data/train_s2/target",
+        "ref_font_path": "./fonts/reference_font.otf",
+        "target_font_path": "./fonts/GD-HighwayGothicJA.otf",
+        "candidate_chars": all_candidate_chars,
+        "learning_list_file": learning_list_file,
+        "load_G_path": "./checkpoints/gd_highway_pro/G_pretrain_256_ep150.pth",
+        "freeze_G_layers": 2,
+    }
+
+    train(config_stage2)
