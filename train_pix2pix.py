@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.18 (PR #9)
+:version: 1.0.22 (PR #9)
 :since:   1.0.15 (PR #7)
-:last-modified: 2025-06-22 22:03:48 JST+9
+:last-modified: 2025-06-23 00:00:00 JST+9
 
 :todo:
     - Refactor training loop for CLI usage
@@ -140,6 +140,9 @@ class FontPairDataset(Dataset):
         transform: Callable | None = None,
         augment: bool = False,
         augment_source_only: bool = False,
+        img_size: int = 256,
+        transform_source: Callable | None = None,
+        transform_target: Callable | None = None,
     ) -> None:
         """ディレクトリから画像ペアを読み込む。
 
@@ -153,6 +156,12 @@ class FontPairDataset(Dataset):
         :type augment: bool
         :param augment_source_only: 参考フォントのみ増強を適用するかどうか
         :type augment_source_only: bool
+        :param img_size: 画像サイズを揃えるピクセル数
+        :type img_size: int
+        :param transform_source: 参考フォント専用前処理
+        :type transform_source: Callable | None
+        :param transform_target: ターゲットフォント専用前処理
+        :type transform_target: Callable | None
         """
         src = sorted(glob.glob(os.path.join(source_dir, "*.png")))
         tgt = []
@@ -165,7 +174,11 @@ class FontPairDataset(Dataset):
         valid_src = [p for p in src if os.path.join(target_dir, os.path.basename(p)) in tgt]
         self.src_paths = valid_src
         self.tgt_paths = [os.path.join(target_dir, os.path.basename(p)) for p in valid_src]
-        if transform:
+        self.img_size = img_size
+        if transform_source or transform_target:
+            self.src_transform = transform_source or T.Compose([T.ToTensor(), T.Normalize((0.5,), (0.5,))])
+            self.tgt_transform = transform_target or T.Compose([T.ToTensor(), T.Normalize((0.5,), (0.5,))])
+        elif transform:
             self.src_transform = transform
             self.tgt_transform = transform
         else:
@@ -209,48 +222,45 @@ class FontPairDataset(Dataset):
             tgt = Image.open(tgt_path).convert("L")
         except FileNotFoundError as exc:
             raise RuntimeError(f"Image pair not found: {src_path}, {tgt_path}") from exc
+        if src.size != (self.img_size, self.img_size):
+            src = src.resize((self.img_size, self.img_size), Image.BICUBIC)
+        if tgt.size != (self.img_size, self.img_size):
+            tgt = tgt.resize((self.img_size, self.img_size), Image.BICUBIC)
         return self.src_transform(src), self.tgt_transform(tgt)
 
 
 class UNetGenerator(nn.Module):
     """U-Net 形式のジェネレータ。"""
 
-    def __init__(self, in_ch: int = 1, out_ch: int = 1, ngf: int = 64) -> None:
+    def __init__(self, in_ch: int = 1, out_ch: int = 1, ngf: int = 64, num_downs: int = 8) -> None:
         super().__init__()
-        self.down1 = nn.Sequential(nn.Conv2d(in_ch, ngf, 4, 2, 1, bias=False), nn.LeakyReLU(0.2))
-        self.down2 = nn.Sequential(nn.Conv2d(ngf, ngf * 2, 4, 2, 1, bias=False), nn.BatchNorm2d(ngf * 2), nn.LeakyReLU(0.2))
-        self.down3 = nn.Sequential(nn.Conv2d(ngf * 2, ngf * 4, 4, 2, 1, bias=False), nn.BatchNorm2d(ngf * 4), nn.LeakyReLU(0.2))
-        self.down4 = nn.Sequential(nn.Conv2d(ngf * 4, ngf * 8, 4, 2, 1, bias=False), nn.BatchNorm2d(ngf * 8), nn.LeakyReLU(0.2))
-        self.down5 = nn.Sequential(nn.Conv2d(ngf * 8, ngf * 8, 4, 2, 1, bias=False), nn.BatchNorm2d(ngf * 8), nn.LeakyReLU(0.2))
-        self.down6 = nn.Sequential(nn.Conv2d(ngf * 8, ngf * 8, 4, 2, 1, bias=False), nn.BatchNorm2d(ngf * 8), nn.LeakyReLU(0.2))
-        self.down7 = nn.Sequential(nn.Conv2d(ngf * 8, ngf * 8, 4, 2, 1, bias=False), nn.BatchNorm2d(ngf * 8), nn.LeakyReLU(0.2))
-        self.down8 = nn.Sequential(nn.Conv2d(ngf * 8, ngf * 8, 4, 2, 1, bias=False), nn.ReLU(True))
+        downs: list[nn.Module] = []
+        ch = ngf
+        downs.append(nn.Sequential(nn.Conv2d(in_ch, ch, 4, 2, 1, bias=False), nn.LeakyReLU(0.2)))
+        for i in range(1, num_downs):
+            in_c = ch
+            ch = min(ngf * 2 ** i, ngf * 8)
+            downs.append(nn.Sequential(nn.Conv2d(in_c, ch, 4, 2, 1, bias=False), nn.BatchNorm2d(ch), nn.LeakyReLU(0.2)))
+        self.downs = nn.ModuleList(downs)
 
-        self.up1 = nn.Sequential(nn.ConvTranspose2d(ngf * 8, ngf * 8, 4, 2, 1, bias=False), nn.BatchNorm2d(ngf * 8), nn.ReLU(True))
-        self.up2 = nn.Sequential(nn.ConvTranspose2d(ngf * 16, ngf * 8, 4, 2, 1, bias=False), nn.BatchNorm2d(ngf * 8), nn.ReLU(True))
-        self.up3 = nn.Sequential(nn.ConvTranspose2d(ngf * 16, ngf * 8, 4, 2, 1, bias=False), nn.BatchNorm2d(ngf * 8), nn.ReLU(True))
-        self.up4 = nn.Sequential(nn.ConvTranspose2d(ngf * 16, ngf * 4, 4, 2, 1, bias=False), nn.BatchNorm2d(ngf * 4), nn.ReLU(True))
-        self.up5 = nn.Sequential(nn.ConvTranspose2d(ngf * 8, ngf * 2, 4, 2, 1, bias=False), nn.BatchNorm2d(ngf * 2), nn.ReLU(True))
-        self.up6 = nn.Sequential(nn.ConvTranspose2d(ngf * 4, ngf, 4, 2, 1, bias=False), nn.BatchNorm2d(ngf), nn.ReLU(True))
-        self.up7 = nn.Sequential(nn.ConvTranspose2d(ngf * 2, out_ch, 4, 2, 1), nn.Tanh())
+        ups: list[nn.Module] = []
+        for i in range(num_downs - 1):
+            in_c = ch * 2 if i != 0 else ch
+            ch = min(max(in_c // 2, ngf), ngf * 8) if i < num_downs - 2 else ngf
+            ups.append(nn.Sequential(nn.ConvTranspose2d(in_c, ch, 4, 2, 1, bias=False), nn.BatchNorm2d(ch), nn.ReLU(True)))
+        ups.append(nn.Sequential(nn.ConvTranspose2d(ch * 2, out_ch, 4, 2, 1), nn.Tanh()))
+        self.ups = nn.ModuleList(ups)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        d1 = self.down1(x)
-        d2 = self.down2(d1)
-        d3 = self.down3(d2)
-        d4 = self.down4(d3)
-        d5 = self.down5(d4)
-        d6 = self.down6(d5)
-        d7 = self.down7(d6)
-        d8 = self.down8(d7)
-
-        u1 = self.up1(d8)
-        u2 = self.up2(torch.cat([u1, d7], 1))
-        u3 = self.up3(torch.cat([u2, d6], 1))
-        u4 = self.up4(torch.cat([u3, d5], 1))
-        u5 = self.up5(torch.cat([u4, d4], 1))
-        u6 = self.up6(torch.cat([u5, d3], 1))
-        final = self.up7(torch.cat([u6, d1], 1))
+        downs_out: list[torch.Tensor] = []
+        cur = x
+        for mod in self.downs:
+            cur = mod(cur)
+            downs_out.append(cur)
+        for i, mod in enumerate(self.ups[:-1]):
+            skip = downs_out[-(i + 2)] if i + 2 <= len(downs_out) else downs_out[0]
+            cur = mod(torch.cat([cur, skip], dim=1))
+        final = self.ups[-1](torch.cat([cur, downs_out[0]], dim=1))
         return final
 
 
@@ -288,15 +298,7 @@ class PatchDiscriminator(nn.Module):
 def freeze_generator_layers(generator: UNetGenerator, num_layers: int) -> None:
     """ジェネレータの最初の ``num_layers`` 層の学習を凍結する。"""
 
-    layers = [
-        generator.down1,
-        generator.down2,
-        generator.down3,
-        generator.down4,
-        generator.down5,
-        generator.down6,
-        generator.down7,
-    ]
+    layers = list(generator.downs)
     for l in layers[:num_layers]:
         for p in l.parameters():
             p.requires_grad = False
@@ -313,6 +315,8 @@ def train(
     perceptual_lambda: float = 0.0,
     use_perceptual_loss: bool = False,
     img_size: int = 256,
+    num_downs: int = 8,
+    use_amp: bool = False,
     checkpoint_dir: str = "checkpoints",
     source_data_dir: str = "data/train/source",
     target_data_dir: str = "data/train/target",
@@ -320,7 +324,6 @@ def train(
     pretrained_D_path: str | None = None,
     augment: bool = False,
     augment_source_only: bool = False,
-    perceptual_lambda: float = 0.0,
     freeze_layers: int = 0,
 ) -> None:
     """学習ループを実行する。
@@ -345,6 +348,10 @@ def train(
     :type use_perceptual_loss: bool
     :param img_size: 画像レンダリングサイズ
     :type img_size: int
+    :param num_downs: U-Net のダウンサンプル回数
+    :type num_downs: int
+    :param use_amp: Mixed Precision 学習を行うか
+    :type use_amp: bool
     :param checkpoint_dir: チェックポイント保存先
     :type checkpoint_dir: str
     :param source_data_dir: 参考フォント画像ディレクトリ
@@ -359,8 +366,6 @@ def train(
     :type augment: bool
     :param augment_source_only: 参考フォントのみ増強を適用するか
     :type augment_source_only: bool
-    :param perceptual_lambda: Perceptual Loss の重み。0で無効
-    :type perceptual_lambda: float
     :param freeze_layers: Stage2 で凍結するジェネレータ層数
     :type freeze_layers: int
     """
@@ -388,14 +393,16 @@ def train(
         target_data_dir,
         augment=augment,
         augment_source_only=augment_source_only,
+        img_size=img_size,
     )
     if len(ds) == 0:
         print("Dataset is empty")
         return
     dl = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=max(os.cpu_count() // 2, 1), pin_memory=True)
 
-    G = UNetGenerator().to(device)
-    D = PatchDiscriminator().to(device)
+    G = UNetGenerator(num_downs=num_downs).to(device)
+    d_layers = 3 if img_size <= 256 else 4
+    D = PatchDiscriminator(n_layers=d_layers).to(device)
 
     def weights_init(m: nn.Module) -> None:
         classname = m.__class__.__name__
@@ -419,6 +426,7 @@ def train(
 
     opt_G = optim.Adam(G.parameters(), lr=lr, betas=(0.5, 0.999))
     opt_D = optim.Adam(D.parameters(), lr=lr, betas=(0.5, 0.999))
+    scaler = torch.cuda.amp.GradScaler(enabled=(use_amp and device == "cuda"))
 
     criterion_GAN = nn.BCEWithLogitsLoss()
     criterion_L1 = nn.L1Loss()
@@ -432,28 +440,31 @@ def train(
             src, real = src.to(device), real.to(device)
 
             opt_D.zero_grad()
-            fake = G(src)
-            real_pred = D(src, real)
-            fake_pred = D(src, fake.detach())
-            loss_D_real = criterion_GAN(real_pred, torch.ones_like(real_pred))
-            loss_D_fake = criterion_GAN(fake_pred, torch.zeros_like(fake_pred))
-            loss_D = (loss_D_real + loss_D_fake) * 0.5
-            loss_D.backward()
-            opt_D.step()
+            with torch.cuda.amp.autocast(enabled=(use_amp and device == "cuda")):
+                fake = G(src)
+                real_pred = D(src, real)
+                fake_pred = D(src, fake.detach())
+                loss_D_real = criterion_GAN(real_pred, torch.ones_like(real_pred))
+                loss_D_fake = criterion_GAN(fake_pred, torch.zeros_like(fake_pred))
+                loss_D = (loss_D_real + loss_D_fake) * 0.5
+            scaler.scale(loss_D).backward()
+            scaler.step(opt_D)
+            scaler.update()
 
             opt_G.zero_grad()
-            fake = G(src)
-            fake_pred_for_g = D(src, fake)
-            loss_G_GAN = criterion_GAN(fake_pred_for_g, torch.ones_like(fake_pred_for_g))
-            loss_G_L1 = criterion_L1(fake, real) * l1_lambda
-            if perceptual is not None:
-                loss_G_per = perceptual(fake, real)
-                loss_G = loss_G_GAN + loss_G_L1 + loss_G_per
-            else:
-                loss_G = loss_G_GAN + loss_G_L1
-
-            loss_G.backward()
-            opt_G.step()
+            with torch.cuda.amp.autocast(enabled=(use_amp and device == "cuda")):
+                fake = G(src)
+                fake_pred_for_g = D(src, fake)
+                loss_G_GAN = criterion_GAN(fake_pred_for_g, torch.ones_like(fake_pred_for_g))
+                loss_G_L1 = criterion_L1(fake, real) * l1_lambda
+                if perceptual is not None:
+                    loss_G_per = perceptual(fake, real)
+                    loss_G = loss_G_GAN + loss_G_L1 + loss_G_per
+                else:
+                    loss_G = loss_G_GAN + loss_G_L1
+            scaler.scale(loss_G).backward()
+            scaler.step(opt_G)
+            scaler.update()
 
         print(
             f"Epoch {epoch:03d} loss_D:{loss_D.item():.4f} loss_G:{loss_G.item():.4f}"
@@ -475,10 +486,28 @@ def inference(
     ref_font_path: str,
     out_dir: str,
     batch_size: int = 4,
+    img_size: int = 256,
+    num_downs: int = 8,
 ) -> None:
-    """学習済みモデルを用いて文字画像を生成する。"""
+    """学習済みモデルを用いて文字画像を生成する。
+
+    :param gen_checkpoint: Generator のチェックポイント
+    :type gen_checkpoint: str
+    :param chars_to_generate: 生成する文字マップ
+    :type chars_to_generate: Dict[int, str]
+    :param ref_font_path: 参考フォントパス
+    :type ref_font_path: str
+    :param out_dir: 出力ディレクトリ
+    :type out_dir: str
+    :param batch_size: 推論バッチサイズ
+    :type batch_size: int
+    :param img_size: 画像サイズ
+    :type img_size: int
+    :param num_downs: Generator のダウンサンプル回数
+    :type num_downs: int
+    """
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    G = UNetGenerator().to(device)
+    G = UNetGenerator(num_downs=num_downs).to(device)
     G.load_state_dict(torch.load(gen_checkpoint, map_location=device))
     G.eval()
 
@@ -492,7 +521,7 @@ def inference(
         file_names = []
         for code, glyph in batch_items:
             buf = io.BytesIO()
-            render_char_to_png(ref_font_path, glyph, buf)
+            render_char_to_png(ref_font_path, glyph, buf, size=img_size)
             img = Image.open(buf).convert("L")
             tensors.append(transform(img))
             file_names.append(os.path.join(out_dir, f"{code}.png"))
@@ -521,6 +550,10 @@ def stagewise_train(
     checkpoint_dir: str = "checkpoints",
     rehearsal_ratio: float = 0.0,
     freeze_layers: int = 0,
+    stage1_img_size: int = 256,
+    stage2_img_size: int | None = None,
+    stage1_num_downs: int = 8,
+    stage2_num_downs: int | None = None,
     **kwargs,
 ) -> None:
     """事前学習と微調整を続けて行うヘルパー関数。
@@ -529,6 +562,14 @@ def stagewise_train(
     :type rehearsal_ratio: float
     :param freeze_layers: Stage2 学習で凍結するジェネレータ層数
     :type freeze_layers: int
+    :param stage1_img_size: Stage1 の画像サイズ
+    :type stage1_img_size: int
+    :param stage2_img_size: Stage2 の画像サイズ (未指定なら Stage1 と同じ)
+    :type stage2_img_size: int | None
+    :param stage1_num_downs: Stage1 のU-Netダウンサンプル回数
+    :type stage1_num_downs: int
+    :param stage2_num_downs: Stage2 のU-Netダウンサンプル回数
+    :type stage2_num_downs: int | None
     """
 
     train(
@@ -538,6 +579,8 @@ def stagewise_train(
         epochs=stage1_epochs,
         lr=stage1_lr,
         checkpoint_dir=checkpoint_dir,
+        img_size=stage1_img_size,
+        num_downs=stage1_num_downs,
         **kwargs,
     )
 
@@ -562,6 +605,8 @@ def stagewise_train(
         pretrained_D_path=d_ckpt,
         augment_source_only=True,
         freeze_layers=freeze_layers,
+        img_size=stage2_img_size or stage1_img_size,
+        num_downs=stage2_num_downs or stage1_num_downs,
         **kwargs,
     )
 
@@ -603,7 +648,6 @@ if __name__ == "__main__":
         checkpoint_dir=CHECKPOINT_DIR,
         batch_size=BATCH_SIZE,
         l1_lambda=L1_LAMBDA,
-        perceptual_lambda=1.0,
         use_perceptual_loss=True,
         source_data_dir=os.path.join(OUTPUT_DIR_TRAIN, "train", "source"),
         target_data_dir=os.path.join(OUTPUT_DIR_TRAIN, "train", "target"),

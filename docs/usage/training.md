@@ -11,8 +11,9 @@
 ```bash
 python train_pix2pix.py
 ```
-
 エポックごとに進捗が表示され、10エポックごとに `checkpoints/` へモデルが保存されます。
+`img_size` や `num_downs` を調整することで 512px までの高解像度モデルが学習可能です。
+GPU メモリが厳しい場合は `use_amp=True` を指定すると混合精度学習となります。
 
 ## 2 段階学習
 
