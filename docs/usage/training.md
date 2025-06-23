@@ -42,6 +42,8 @@ stagewise_train(
 
 複数のハイパーパラメータを YAML にまとめ、`train_from_config` 関数から読み込むことができます。
 
+設定ファイルの詳細は [設定ファイルによる実行](../configuration.md) を参照してください。特に `learning_list_file` を使うと学習文字を外部ファイルで管理できます。
+
 ```bash
 python -c "from train_pix2pix import train_from_config; train_from_config('conf.yaml')"
 ```

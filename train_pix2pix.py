@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.29 (PR #14)
+:version: 1.0.54 (PR #24)
 :since:   1.0.15 (PR #7)
-:last-modified: 2025-06-23 04:49:50 JST+9
+:last-modified: 2025-06-23 05:00:00 JST+9
 
 :todo:
     - Refactor training loop for CLI usage
@@ -187,6 +187,27 @@ def render_char_to_png(font_path: str, char: str, out_path_or_buffer: str | io.B
         img.save(out_path_or_buffer, format="PNG")
         out_path_or_buffer.seek(0)
     return img
+
+
+def load_char_list_from_file(path: str) -> Dict[int, str]:
+    """テキストファイルから学習文字を読み込むユーティリティ。"""
+
+    chars: Dict[int, str] = {}
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            if line.upper().startswith("U+"):
+                try:
+                    code = int(line[2:], 16)
+                    chars[code] = chr(code)
+                except Exception:
+                    continue
+            else:
+                ch = line[0]
+                chars[ord(ch)] = ch
+    return chars
 
 
 class FontPairDataset(Dataset):
@@ -731,10 +752,16 @@ def stagewise_train(
 
 
 def train_from_config(config_path: str) -> None:
-    """YAML ファイルから設定を読み込み :func:`train` を実行する。"""
+    """YAML ファイルから設定を読み込み :func:`train` を実行する。
+
+    YAML 内で ``learning_list_file`` を指定すると、外部テキストファイル
+    から学習対象文字を読み込み ``chars_to_render`` に展開する。
+    """
 
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+    if "learning_list_file" in cfg and "chars_to_render" not in cfg:
+        cfg["chars_to_render"] = load_char_list_from_file(cfg.pop("learning_list_file"))
     train(**cfg)
 
 
