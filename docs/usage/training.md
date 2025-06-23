@@ -64,3 +64,15 @@ python train_pix2pix_pro.py \
   --checkpoint_dir ./checkpoints/gd_highway_pro
 ```
 
+学習対象文字を細かく指定したい場合は ``--include_chars`` ``--exclude_chars``
+``--range_start`` ``--range_end`` を併用します。
+
+```bash
+python train_pix2pix_pro.py \
+  --stage s1_256 \
+  --include_chars chars.txt --exclude_chars skip.txt \
+  --range_start 3040 --range_end 309F \
+  --ref_font ./fonts/ref.otf \
+  --target_font ./fonts/GD-HighwayGothicJA.otf
+```
+

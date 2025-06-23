@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.47 (PR #21)
+:version: 1.0.50 (PR #22)
 :since:   1.0.30 (PR #14)
-:last-modified: 2025-06-23 09:08:14 JST+9
+:last-modified: 2025-06-23 09:40:00 JST+9
 :todo:
     - Improve configurability via YAML
 """
@@ -80,6 +80,56 @@ def load_char_list_from_file(path: str) -> dict[int, str]:
                 ch = line[0]
                 chars[ord(ch)] = ch
     return chars
+
+
+def build_candidate_chars(
+    include_file: str | None,
+    exclude_file: str | None,
+    range_start: int | None,
+    range_end: int | None,
+) -> dict[int, str]:
+    """Construct a candidate character dictionary.
+
+    :param include_file: Text file listing characters or code points to include.
+    :param exclude_file: Text file listing characters to remove from the set.
+    :param range_start: Unicode code point (hex) for range start.
+    :param range_end: Unicode code point (hex) for range end.
+    :return: Mapping from code point to character.
+    """
+    candidates: dict[int, str] = {}
+    if include_file and os.path.exists(include_file):
+        candidates.update(load_char_list_from_file(include_file))
+    if range_start is not None and range_end is not None:
+        for code in range(range_start, range_end + 1):
+            candidates.setdefault(code, chr(code))
+    if exclude_file and os.path.exists(exclude_file):
+        excludes = load_char_list_from_file(exclude_file)
+        for code in excludes.keys():
+            candidates.pop(code, None)
+    return candidates
+
+
+def filter_by_both_fonts(
+    candidates: dict[int, str],
+    base_font: str,
+    ref_font: str,
+    size: int = 256,
+) -> dict[int, str]:
+    """Filter out characters blank in either font.
+
+    :param candidates: Mapping from code point to character.
+    :param base_font: Path to the base font file.
+    :param ref_font: Path to the reference font file.
+    :param size: Rendering size for blank check.
+    :return: Filtered mapping available in both fonts.
+    """
+    filtered: dict[int, str] = {}
+    for code, ch in candidates.items():
+        if not is_blank_glyph(base_font, ch, size) and not is_blank_glyph(
+            ref_font, ch, size
+        ):
+            filtered[code] = ch
+    return filtered
 
 
 def is_blank_glyph(font_path: str, char: str, size: int = 256, threshold: int = 250) -> bool:
@@ -637,6 +687,20 @@ def main() -> None:
         default=None,
         help="Candidate character file for auto detection",
     )
+    parser.add_argument("--include_chars", type=str, default=None, help="Characters to always include")
+    parser.add_argument("--exclude_chars", type=str, default=None, help="Characters to exclude")
+    parser.add_argument(
+        "--range_start",
+        type=lambda s: int(s, 16),
+        default=None,
+        help="Range start code point in hex (e.g. 3040)",
+    )
+    parser.add_argument(
+        "--range_end",
+        type=lambda s: int(s, 16),
+        default=None,
+        help="Range end code point in hex (e.g. 309F)",
+    )
     parser.add_argument(
         "--data_dir_root",
         type=str,
@@ -653,22 +717,35 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.candidate_char_file and os.path.exists(args.candidate_char_file):
-        candidate_chars = load_char_list_from_file(args.candidate_char_file)
-    else:
-        candidate_chars = {
-            ord(c): c
-            for c in (
-                "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                "abcdefghijklmnopqrstuvwxyz"
-                "0123456789"
-                "あいうえおかきくけこさしすせそ"
-                "たちつてと"
-                "なにぬねのはひふへほ"
-                "まみむめもやゆよらりるれろわをん"
-                "道高速路"
-            )
-        }
+    candidate_chars = build_candidate_chars(
+        include_file=args.include_chars or args.candidate_char_file,
+        exclude_file=args.exclude_chars,
+        range_start=args.range_start,
+        range_end=args.range_end,
+    )
+    if not candidate_chars:
+        if args.candidate_char_file and os.path.exists(args.candidate_char_file):
+            candidate_chars = load_char_list_from_file(args.candidate_char_file)
+        else:
+            candidate_chars = {
+                ord(c): c
+                for c in (
+                    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                    "abcdefghijklmnopqrstuvwxyz"
+                    "0123456789"
+                    "あいうえおかきくけこさしすせそ"
+                    "たちつてと"
+                    "なにぬねのはひふへほ"
+                    "まみむめもやゆよらりるれろわをん"
+                    "道高速路"
+                )
+            }
+
+    candidate_chars = filter_by_both_fonts(
+        candidate_chars,
+        base_font=args.target_font,
+        ref_font=args.ref_font,
+    )
 
     base_config = {
         "norm_type": "instance",
