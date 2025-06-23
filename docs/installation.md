@@ -92,4 +92,5 @@ python train_pix2pix.py
 ```
 
 学習後は生成された PNG を FontForge 等でトレースし、フォントファイルへ組み込んでください。
+引き続き [チュートリアル](tutorial.md) で実行例を確認するとスムーズです。
 
