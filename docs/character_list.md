@@ -23,3 +23,21 @@ U+6C34
 手動メンテナンスの手間が減ります。
 
 この仕組みにより、コード内に文字列をベタ書きせず柔軟に学習文字を管理できます。
+
+## include/exclude 方式と範囲指定
+
+バージョン 1.0.50 からは ``--include_chars`` と ``--exclude_chars`` に
+テキストファイルを指定することで、学習候補を追加・削除できます。
+さらに ``--range_start`` ``--range_end`` を組み合わせると、
+Unicode コードポイント範囲を直接指定できます。これらで得られた候補は
+ベースフォントと参考フォントの両方に存在するかを確認し、片方でも
+空白グリフの場合は除外されます。
+
+```bash
+python train_pix2pix_pro.py --stage s1_256 \
+  --include_chars chars.txt --exclude_chars skip.txt \
+  --range_start 3040 --range_end 309F \
+  --ref_font ./fonts/ref.otf --target_font ./fonts/base.otf
+```
+
+``chars.txt`` に必ず学習したい文字を、``skip.txt`` に除外したい文字を列挙します。
