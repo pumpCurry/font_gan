@@ -5,7 +5,7 @@
 
 ## 環境セットアップ
 
-1. [環境構築ガイド](docs/installation.md) に従い Conda 環境を作成します。
+1. Conda 版の [環境構築ガイド](docs/installation.md) または、pip を使った [pip + venv での環境構築](docs/installation_venv.md) に従ってセットアップします。
 2. ライブラリをインストール後、以下のコマンドで GPU が利用可能か確認します。
 
 ```bash
