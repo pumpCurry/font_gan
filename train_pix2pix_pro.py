@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.43 (PR #19)
+:version: 1.0.45 (PR #20)
 :since:   1.0.30 (PR #14)
-:last-modified: 2025-06-23 05:59:54 JST+9
+:last-modified: 2025-06-23 08:41:47 JST+9
 :todo:
     - Improve configurability via YAML
 """
@@ -20,6 +20,8 @@ import random
 import io
 import argparse
 import pprint
+import time
+import json
 
 
 from PIL import Image, ImageDraw, ImageFont
@@ -178,6 +180,57 @@ def compute_metrics(fake: torch.Tensor, real: torch.Tensor) -> dict:
     return {"psnr": float(np.mean(psnr_vals)), "ssim": float(np.mean(ssim_vals))}
 
 
+@torch.no_grad()
+def validate_epoch(
+    generator: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    writer: SummaryWriter,
+    epoch: int,
+) -> float:
+    """Run validation and log metrics.
+
+    Args:
+        generator: Trained generator model.
+        loader: Validation ``DataLoader``.
+        device: Torch device.
+        writer: TensorBoard writer.
+        epoch: Current epoch number.
+
+    Returns:
+        Average PSNR value over the validation set.
+    """
+    generator.eval()
+    psnrs: list[float] = []
+    ssims: list[float] = []
+    first = True
+    vbar = tqdm(loader, desc=f"Validating Epoch {epoch}")
+    for src, real in vbar:
+        src, real = src.to(device), real.to(device)
+        fake = generator(src)
+        metrics = compute_metrics(fake, real)
+        psnrs.append(metrics["psnr"])
+        ssims.append(metrics["ssim"])
+        if first:
+            grid = vutils.make_grid(
+                torch.cat([
+                    src.add(1).div(2),
+                    fake.add(1).div(2),
+                    real.add(1).div(2),
+                ]),
+                nrow=src.size(0),
+            )
+            writer.add_image("Validation/Comparison", grid, epoch)
+            first = False
+
+    avg_psnr = float(np.mean(psnrs))
+    avg_ssim = float(np.mean(ssims))
+    writer.add_scalar("Validation/PSNR", avg_psnr, epoch)
+    writer.add_scalar("Validation/SSIM", avg_ssim, epoch)
+    print(f"Validation Epoch {epoch} -> Avg PSNR: {avg_psnr:.2f}, Avg SSIM: {avg_ssim:.3f}")
+    return avg_psnr
+
+
 class VGGPerceptualLoss(nn.Module):
     """VGG を用いた知覚損失。"""
 
@@ -245,9 +298,20 @@ class FontPairDataset(Dataset):
         rehearsal_ratio: float = 0.0,
         rehearsal_source_dir: str | None = None,
         rehearsal_target_dir: str | None = None,
+        char_codes: list[int] | None = None,
     ) -> None:
-        self.src_paths = sorted(glob.glob(os.path.join(source_dir, "*.png")))
-        self.tgt_paths = [os.path.join(target_dir, os.path.basename(p)) for p in self.src_paths]
+        if char_codes is not None:
+            self.src_paths = [os.path.join(source_dir, f"{c}.png") for c in char_codes]
+            self.tgt_paths = [os.path.join(target_dir, f"{c}.png") for c in char_codes]
+            pairs = [
+                (s, t)
+                for s, t in zip(self.src_paths, self.tgt_paths)
+                if os.path.exists(s) and os.path.exists(t)
+            ]
+            self.src_paths, self.tgt_paths = zip(*pairs) if pairs else ([], [])
+        else:
+            self.src_paths = sorted(glob.glob(os.path.join(source_dir, "*.png")))
+            self.tgt_paths = [os.path.join(target_dir, os.path.basename(p)) for p in self.src_paths]
 
         if (
             is_stage2
@@ -383,8 +447,17 @@ def train(config: dict) -> None:
     """Run pix2pix training with the provided configuration."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     set_seed(config.get("seed", 2025))
-    writer = SummaryWriter(log_dir=os.path.join(config["checkpoint_dir"], "logs"))
-    writer.add_text("Config", pprint.pformat(config))
+    run_dir = os.path.join(
+        config["checkpoint_dir"], f"{config['stage_name']}_{time.strftime('%Y%m%d-%H%M%S')}"
+    )
+    log_dir = os.path.join(run_dir, "logs")
+    model_dir = os.path.join(run_dir, "models")
+    os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(model_dir, exist_ok=True)
+    writer = SummaryWriter(log_dir=log_dir)
+    writer.add_text("Config", f"<pre>{pprint.pformat(config)}</pre>", 0)
+    with open(os.path.join(run_dir, "config.json"), "w", encoding="utf-8") as fp:
+        json.dump(config, fp, indent=4, ensure_ascii=False)
     os.makedirs(config["source_data_dir"], exist_ok=True)
     os.makedirs(config["target_data_dir"], exist_ok=True)
     char_map = build_learning_char_map(
@@ -392,13 +465,37 @@ def train(config: dict) -> None:
         candidate_chars=config["candidate_chars"],
         external_list_path=config.get("learning_list_file"),
     )
+    all_codes = list(char_map.keys())
+    random.shuffle(all_codes)
+    val_size = int(len(all_codes) * config.get("val_split_ratio", 0.1))
+    val_codes = all_codes[:val_size]
+    train_codes = all_codes[val_size:]
+    print(f"[Info] Data split -> Train: {len(train_codes)}, Validation: {len(val_codes)}")
     for code, glyph in char_map.items():
         render_char_to_png(config["ref_font_path"], glyph, os.path.join(config["source_data_dir"], f"{code}.png"), size=config["img_size"])
         render_char_to_png(config["target_font_path"], glyph, os.path.join(config["target_data_dir"], f"{code}.png"), size=config["img_size"])
     tf_s = T.Compose([lambda img: morphology_transform(img, 1, 1), T.RandomAffine(degrees=1.5, translate=(0.02, 0.02), scale=(0.98, 1.02), fill=255)])
     tf_t = T.Compose([lambda img: morphology_transform(img, 1, 1)])
-    ds = FontPairDataset(config["source_data_dir"], config["target_data_dir"], transform_source_pil=tf_s, transform_target_pil=tf_t, img_size=config["img_size"])
-    dl = DataLoader(ds, batch_size=config["batch_size"], shuffle=True, num_workers=4)
+    train_ds = FontPairDataset(
+        config["source_data_dir"],
+        config["target_data_dir"],
+        transform_source_pil=tf_s,
+        transform_target_pil=tf_t,
+        img_size=config["img_size"],
+        is_stage2=config["stage_name"] == "progressive_512",
+        rehearsal_ratio=config.get("rehearsal_ratio", 0.0),
+        rehearsal_source_dir=config.get("rehearsal_source_dir"),
+        rehearsal_target_dir=config.get("rehearsal_target_dir"),
+        char_codes=train_codes,
+    )
+    val_ds = FontPairDataset(
+        config["source_data_dir"],
+        config["target_data_dir"],
+        img_size=config["img_size"],
+        char_codes=val_codes,
+    )
+    dl = DataLoader(train_ds, batch_size=config["batch_size"], shuffle=True, num_workers=config.get("num_workers", 0))
+    val_dl = DataLoader(val_ds, batch_size=config["batch_size"], shuffle=False, num_workers=config.get("num_workers", 0))
     G = UNetGenerator(num_downs=config["num_unet_downs"], norm_type=config["norm_type"]).to(device)
     D = PatchDiscriminator(n_layers=config["d_n_layers"], norm_type=config["norm_type"]).to(device)
     if config.get("load_G_path"):
@@ -424,6 +521,7 @@ def train(config: dict) -> None:
     sched_d = CosineAnnealingLR(opt_d, T_max=config["epochs"], eta_min=1e-7)
     scaler = torch.cuda.amp.GradScaler(enabled=config["use_amp"])
     step = 0
+    best_psnr = 0.0
     for epoch in range(1, config["epochs"] + 1):
         G.train()
         D.train()
@@ -439,6 +537,8 @@ def train(config: dict) -> None:
                 l_g = (l_gan + l_l1 + l_p) / config["accum_steps"]
             scaler.scale(l_g).backward()
             if (i + 1) % config["accum_steps"] == 0:
+                scaler.unscale_(opt_g)
+                torch.nn.utils.clip_grad_norm_(G.parameters(), 1.0)
                 scaler.step(opt_g)
                 scaler.update()
                 opt_g.zero_grad()
@@ -449,6 +549,8 @@ def train(config: dict) -> None:
                 l_d = ((l_dr + l_df) * 0.5) / config["accum_steps"]
             scaler.scale(l_d).backward()
             if (i + 1) % config["accum_steps"] == 0:
+                scaler.unscale_(opt_d)
+                torch.nn.utils.clip_grad_norm_(D.parameters(), 1.0)
                 scaler.step(opt_d)
                 scaler.update()
                 opt_d.zero_grad()
@@ -468,38 +570,25 @@ def train(config: dict) -> None:
                 writer.add_scalar("Loss/G_Perceptual", l_p.item(), step)
                 writer.add_scalar("Metrics/PSNR", mets["psnr"], step)
                 writer.add_scalar("Metrics/SSIM", mets["ssim"], step)
+                writer.add_scalar(
+                    "Memory/Allocated (GB)",
+                    torch.cuda.memory_allocated(0) / 1024 ** 3,
+                    step,
+                )
             step += 1
         sched_g.step()
         sched_d.step()
 
-        if epoch % config["save_epoch_freq"] == 0 or epoch == config["epochs"]:
-            G.eval()
-            with torch.no_grad():
-                val_src, val_real = next(iter(dl))
-                val_src, val_real = val_src.to(device), val_real.to(device)
-                val_fake = G(val_src)
-                grid = vutils.make_grid(
-                    torch.cat([
-                        val_src.add(1).div(2),
-                        val_fake.add(1).div(2),
-                        val_real.add(1).div(2),
-                    ]),
-                    nrow=val_src.size(0),
-                )
-                writer.add_image("Comparison (Source-Fake-Real)", grid, epoch)
+        avg_psnr = validate_epoch(G, val_dl, device, writer, epoch)
+        if avg_psnr > best_psnr:
+            best_psnr = avg_psnr
+            torch.save(G.state_dict(), os.path.join(model_dir, "G_best.pth"))
+            torch.save(D.state_dict(), os.path.join(model_dir, "D_best.pth"))
+            print(f"\u2728 New best model saved with PSNR: {best_psnr:.2f}")
 
-            torch.save(
-                G.state_dict(),
-                os.path.join(
-                    config["checkpoint_dir"], f"G_{config['stage_name']}_ep{epoch}.pth"
-                ),
-            )
-            torch.save(
-                D.state_dict(),
-                os.path.join(
-                    config["checkpoint_dir"], f"D_{config['stage_name']}_ep{epoch}.pth"
-                ),
-            )
+        if epoch % config["save_epoch_freq"] == 0 or epoch == config["epochs"]:
+            torch.save(G.state_dict(), os.path.join(model_dir, f"G_ep{epoch}.pth"))
+            torch.save(D.state_dict(), os.path.join(model_dir, f"D_ep{epoch}.pth"))
     writer.close()
 
 
@@ -562,6 +651,8 @@ def main() -> None:
         "use_amp": True,
         "log_freq": 100,
         "save_epoch_freq": 10,
+        "val_split_ratio": 0.1,
+        "num_workers": 0,
         "ref_font_path": args.ref_font,
         "target_font_path": args.target_font,
         "candidate_chars": candidate_chars,
