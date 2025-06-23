@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.45 (PR #20)
+:version: 1.0.47 (PR #21)
 :since:   1.0.30 (PR #14)
-:last-modified: 2025-06-23 08:41:47 JST+9
+:last-modified: 2025-06-23 09:08:14 JST+9
 :todo:
     - Improve configurability via YAML
 """
@@ -474,8 +474,18 @@ def train(config: dict) -> None:
     for code, glyph in char_map.items():
         render_char_to_png(config["ref_font_path"], glyph, os.path.join(config["source_data_dir"], f"{code}.png"), size=config["img_size"])
         render_char_to_png(config["target_font_path"], glyph, os.path.join(config["target_data_dir"], f"{code}.png"), size=config["img_size"])
-    tf_s = T.Compose([lambda img: morphology_transform(img, 1, 1), T.RandomAffine(degrees=1.5, translate=(0.02, 0.02), scale=(0.98, 1.02), fill=255)])
-    tf_t = T.Compose([lambda img: morphology_transform(img, 1, 1)])
+    tf_s = T.Compose(
+        [
+            T.RandomApply([lambda img: morphology_transform(img)], p=0.2),
+            T.RandomAffine(
+                degrees=1.5,
+                translate=(0.02, 0.02),
+                scale=(0.98, 1.02),
+                fill=255,
+            ),
+        ]
+    )
+    tf_t = T.Compose([T.RandomApply([lambda img: morphology_transform(img)], p=0.1)])
     train_ds = FontPairDataset(
         config["source_data_dir"],
         config["target_data_dir"],
@@ -494,8 +504,20 @@ def train(config: dict) -> None:
         img_size=config["img_size"],
         char_codes=val_codes,
     )
-    dl = DataLoader(train_ds, batch_size=config["batch_size"], shuffle=True, num_workers=config.get("num_workers", 0))
-    val_dl = DataLoader(val_ds, batch_size=config["batch_size"], shuffle=False, num_workers=config.get("num_workers", 0))
+    dl = DataLoader(
+        train_ds,
+        batch_size=config["batch_size"],
+        shuffle=True,
+        num_workers=config.get("num_workers", 0),
+        pin_memory=True,
+    )
+    val_dl = DataLoader(
+        val_ds,
+        batch_size=config["batch_size"],
+        shuffle=False,
+        num_workers=config.get("num_workers", 0),
+        pin_memory=True,
+    )
     G = UNetGenerator(num_downs=config["num_unet_downs"], norm_type=config["norm_type"]).to(device)
     D = PatchDiscriminator(n_layers=config["d_n_layers"], norm_type=config["norm_type"]).to(device)
     if config.get("load_G_path"):
@@ -538,7 +560,9 @@ def train(config: dict) -> None:
             scaler.scale(l_g).backward()
             if (i + 1) % config["accum_steps"] == 0:
                 scaler.unscale_(opt_g)
-                torch.nn.utils.clip_grad_norm_(G.parameters(), 1.0)
+                torch.nn.utils.clip_grad_norm_(
+                    G.parameters(), config.get("clip_grad_norm", 1.0)
+                )
                 scaler.step(opt_g)
                 scaler.update()
                 opt_g.zero_grad()
@@ -550,7 +574,9 @@ def train(config: dict) -> None:
             scaler.scale(l_d).backward()
             if (i + 1) % config["accum_steps"] == 0:
                 scaler.unscale_(opt_d)
-                torch.nn.utils.clip_grad_norm_(D.parameters(), 1.0)
+                torch.nn.utils.clip_grad_norm_(
+                    D.parameters(), config.get("clip_grad_norm", 1.0)
+                )
                 scaler.step(opt_d)
                 scaler.update()
                 opt_d.zero_grad()
@@ -649,6 +675,7 @@ def main() -> None:
         "l1_lambda": 100.0,
         "perceptual_lambda": 1.0,
         "use_amp": True,
+        "clip_grad_norm": 1.0,
         "log_freq": 100,
         "save_epoch_freq": 10,
         "val_split_ratio": 0.1,
