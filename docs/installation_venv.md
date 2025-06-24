@@ -2,6 +2,7 @@
 
 このドキュメントでは `conda` を利用しない場合のセットアップ手順を説明します。標準の `venv` と `pip` を使って環境を構築する方法です。
 
+また、Windows 環境向けの手順は [installation_windows.md](installation_windows.md) を参照してください。
 ## 1. システム要件
 
 - **OS**: Ubuntu 20.04 LTS を推奨。Windows では WSL2 上での利用を想定しています。
@@ -18,6 +19,7 @@
 python3 -m venv font_gan_venv
 source font_gan_venv/bin/activate
 ```
+これらの手順は `scripts/setup.sh` を実行することで自動化できます。
 
 ## 3. GPU 動作確認
 
@@ -25,6 +27,7 @@ source font_gan_venv/bin/activate
 nvidia-smi
 ```
 
+`nvidia-smi: command not found` と表示される場合は GPU ドライバがインストールされていません。CPU で実行するか、NVIDIA 公式サイトからドライバを入れてください。
 CUDA バージョンや GPU が表示されれば準備完了です。
 
 ## 4. PyTorch のインストール
@@ -41,6 +44,7 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 import torch
 print(torch.__version__, torch.cuda.is_available())
 ```
+上記コードを `scripts/check_gpu.py` として保存して実行できます。
 
 ## 5. 追加ライブラリ
 
@@ -71,8 +75,11 @@ font_gan/
     ├── GD-HighwayGothicJA.otf
     └── reference_font.otf
 ```
+## 7. 初回準備ファイル
 
-## 7. TensorBoard の起動
+最初に `fonts/` ディレクトリに補完対象フォントと参考フォントを配置します。既存画像を利用する場合は `data/train_s1` や `data/train_s2` 以下に PNG を置きます。必要に応じて `config.json` や学習文字リストもここに準備してください。
+
+## 8. TensorBoard の起動
 
 学習中のログは次のコマンドで確認できます。
 
@@ -82,7 +89,7 @@ tensorboard --logdir ./checkpoints/gd_highway_pro/logs
 
 ブラウザで `http://localhost:6006/` を開くと損失やサンプル画像を閲覧できます。
 
-## 8. 学習と推論
+## 9. 学習と推論
 
 仮想環境を有効化し、`train_pix2pix.py` を実行すると学習が始まります。Stage1(256px) から Stage2(512px) へ自動で移行し、生成結果は `output/` に保存されます。
 
