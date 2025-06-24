@@ -12,6 +12,7 @@
 
 - [環境構築ガイド](installation.md)
 - [pip + venv での環境構築](installation_venv.md)
+- [Windows 版セットアップ](installation_windows.md)
 - [チュートリアル](tutorial.md)
 - [使用方法の概要](usage.md)
 - [学習手順](usage/training.md)
