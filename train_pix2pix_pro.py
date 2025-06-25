@@ -349,7 +349,10 @@ class FontPairDataset(Dataset):
         rehearsal_source_dir: str | None = None,
         rehearsal_target_dir: str | None = None,
         char_codes: list[int] | None = None,
+        skeleton_dir: str | None = None,
     ) -> None:
+        """Initialize dataset with optional skeleton directory."""
+        self.skel_paths: list[str] | None = None
         if char_codes is not None:
             self.src_paths = [os.path.join(source_dir, f"{c}.png") for c in char_codes]
             self.tgt_paths = [os.path.join(target_dir, f"{c}.png") for c in char_codes]
@@ -362,6 +365,12 @@ class FontPairDataset(Dataset):
         else:
             self.src_paths = sorted(glob.glob(os.path.join(source_dir, "*.png")))
             self.tgt_paths = [os.path.join(target_dir, os.path.basename(p)) for p in self.src_paths]
+
+        if skeleton_dir:
+            if char_codes is not None:
+                self.skel_paths = [os.path.join(skeleton_dir, f"{c}.png") for c in char_codes]
+            else:
+                self.skel_paths = [os.path.join(skeleton_dir, os.path.basename(p)) for p in self.src_paths]
 
         if (
             is_stage2
@@ -392,15 +401,25 @@ class FontPairDataset(Dataset):
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         s = Image.open(self.src_paths[index]).convert("L")
         t = Image.open(self.tgt_paths[index]).convert("L")
+        sk = None
+        if self.skel_paths:
+            sk = Image.open(self.skel_paths[index]).convert("L")
         if s.size != (self.img_size, self.img_size):
             s = s.resize((self.img_size, self.img_size), Image.BICUBIC)
         if t.size != (self.img_size, self.img_size):
             t = t.resize((self.img_size, self.img_size), Image.BICUBIC)
+        if sk and sk.size != (self.img_size, self.img_size):
+            sk = sk.resize((self.img_size, self.img_size), Image.BICUBIC)
         if self.tsf_s:
             s = self.tsf_s(s)
         if self.tsf_t:
             t = self.tsf_t(t)
-        s = self.norm(self.to_tensor(s))
+        if sk:
+            sk = self.norm(self.to_tensor(sk))
+            s = self.norm(self.to_tensor(s))
+            s = torch.cat([sk, s], dim=0)
+        else:
+            s = self.norm(self.to_tensor(s))
         t = self.norm(self.to_tensor(t))
         return s, t
 
@@ -547,12 +566,14 @@ def train(config: dict) -> None:
         rehearsal_source_dir=config.get("rehearsal_source_dir"),
         rehearsal_target_dir=config.get("rehearsal_target_dir"),
         char_codes=train_codes,
+        skeleton_dir=config.get("skeleton_dir"),
     )
     val_ds = FontPairDataset(
         config["source_data_dir"],
         config["target_data_dir"],
         img_size=config["img_size"],
         char_codes=val_codes,
+        skeleton_dir=config.get("skeleton_dir"),
     )
     dl = DataLoader(
         train_ds,
@@ -568,8 +589,9 @@ def train(config: dict) -> None:
         num_workers=config.get("num_workers", 0),
         pin_memory=True,
     )
-    G = UNetGenerator(num_downs=config["num_unet_downs"], norm_type=config["norm_type"]).to(device)
-    D = PatchDiscriminator(n_layers=config["d_n_layers"], norm_type=config["norm_type"]).to(device)
+    in_nc = 2 if config.get("skeleton_dir") else 1
+    G = UNetGenerator(in_nc=in_nc, num_downs=config["num_unet_downs"], norm_type=config["norm_type"]).to(device)
+    D = PatchDiscriminator(in_nc=in_nc + 1, n_layers=config["d_n_layers"], norm_type=config["norm_type"]).to(device)
     if config.get("load_G_path"):
         G.load_state_dict(torch.load(config["load_G_path"], map_location=device))
     else:
@@ -714,6 +736,7 @@ def main() -> None:
         help="Directory to save checkpoints",
     )
     parser.add_argument("--batch_size", type=int, default=None, help="Batch size override")
+    parser.add_argument("--skeleton_dir", type=str, default=None, help="Directory of skeleton images")
 
     args = parser.parse_args()
 
@@ -762,6 +785,7 @@ def main() -> None:
         "candidate_chars": candidate_chars,
         "learning_list_file": args.char_list,
         "checkpoint_dir": args.checkpoint_dir,
+        "skeleton_dir": args.skeleton_dir,
     }
 
     if args.stage == "s1_256":
