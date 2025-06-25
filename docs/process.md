@@ -104,4 +104,9 @@
    フィルタを追加。
 3. `character_list.md` と `index.md` を更新し、文字セットの柔軟な設定方法を解説。
 
+### version: 1.0.60 (PR #27)
+1. 骨格画像を生成する `scripts/prepare_skeleton_data.py` を追加。
+2. `train_pix2pix_pro.py` に ``--skeleton_dir`` オプションと対応データセット処理を実装。
+3. ドキュメントに骨格入力の仕組みを追記し、ストローク構造を意識した学習方法を整理。
+
 
