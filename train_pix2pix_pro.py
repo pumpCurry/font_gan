@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.64 (PR #29)
+:version: 1.0.65 (PR #30)
 :since:   1.0.30 (PR #14)
-:last-modified: 2025-06-26 12:00:00 JST+9
+:last-modified: 2025-06-25 10:29:12 JST+9
 :todo:
     - Improve configurability via YAML
 """
@@ -22,6 +22,7 @@ import argparse
 import pprint
 import time
 import json
+import math
 
 
 from PIL import Image, ImageDraw, ImageFont
@@ -334,16 +335,29 @@ def morphology_transform(img: Image.Image, min_shift: int = 1, max_shift: int = 
     out = np.where(processed, 0, 255).astype(np.uint8)
     return Image.fromarray(out)
 
+_SOBEL_X = torch.tensor([[1,0,-1],[2,0,-2],[1,0,-1]], dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+_SOBEL_Y = _SOBEL_X.transpose(-1,-2)
 
-def skeletonize_tensor(tensor: torch.Tensor) -> torch.Tensor:
-    """Return a skeletonized version of ``tensor`` for stroke loss."""
-    np_t = tensor.cpu().detach().numpy()
-    out = np.zeros_like(np_t)
-    for i in range(np_t.shape[0]):
-        binary = np_t[i, 0] > -0.8
-        sk = skeletonize(binary)
-        out[i, 0] = sk.astype(np.float32)
-    return torch.from_numpy(out).to(tensor.device)
+def edge_map(x: torch.Tensor) -> torch.Tensor:
+    """Return gradient magnitude via Sobel filter."""
+    kx = _SOBEL_X.to(x.device)
+    ky = _SOBEL_Y.to(x.device)
+    ex = F.conv2d(x, kx, padding=1)
+    ey = F.conv2d(x, ky, padding=1)
+    return torch.sqrt(ex ** 2 + ey ** 2 + 1e-6)
+
+def stroke_loss(fake: torch.Tensor, ske: torch.Tensor) -> torch.Tensor:
+    """Approximate stroke consistency loss with edge maps."""
+    return F.l1_loss(edge_map(fake), edge_map(ske))
+
+def add_noise(t: torch.Tensor, std: float = 0.05) -> torch.Tensor:
+    """Add Gaussian noise for discriminator input."""
+    if std == 0:
+        return t
+    return t + torch.randn_like(t) * std
+
+
+
 
 
 class FontPairDataset(Dataset):
@@ -381,9 +395,9 @@ class FontPairDataset(Dataset):
 
         if skeleton_dir:
             if char_codes is not None:
-                self.skel_paths = [os.path.join(skeleton_dir, f"{c}.png") for c in char_codes]
+                self.skel_paths = [os.path.join(skeleton_dir, f"{c}.pt") for c in char_codes]
             else:
-                self.skel_paths = [os.path.join(skeleton_dir, os.path.basename(p)) for p in self.src_paths]
+                self.skel_paths = [os.path.join(skeleton_dir, os.path.splitext(os.path.basename(p))[0] + ".pt") for p in self.src_paths]
 
         if (
             is_stage2
@@ -413,33 +427,46 @@ class FontPairDataset(Dataset):
         return len(self.src_paths)
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Return input tensor, target tensor, and skeleton tensor."""
-        s = Image.open(self.src_paths[index]).convert("L")
-        t = Image.open(self.tgt_paths[index]).convert("L")
-        sk = None
+        """Return input tensor, target tensor and optional skeleton."""
+        s_img = Image.open(self.src_paths[index]).convert("L")
+        t_img = Image.open(self.tgt_paths[index]).convert("L")
+        sk_tensor: torch.Tensor | None = None
         if self.skel_paths:
-            sk = Image.open(self.skel_paths[index]).convert("L")
-        if s.size != (self.img_size, self.img_size):
-            s = s.resize((self.img_size, self.img_size), Image.BICUBIC)
-        if t.size != (self.img_size, self.img_size):
-            t = t.resize((self.img_size, self.img_size), Image.BICUBIC)
-        if sk and sk.size != (self.img_size, self.img_size):
-            sk = sk.resize((self.img_size, self.img_size), Image.BICUBIC)
-        if self.tsf_s:
-            s = self.tsf_s(s)
-        if self.tsf_t:
-            t = self.tsf_t(t)
-        if sk and self.tsf_k:
-            sk = self.tsf_k(sk)
-        if sk:
-            sk_tensor = self.norm(self.to_tensor(sk))
-            s_tensor = self.norm(self.to_tensor(s))
-            s = torch.cat([sk_tensor, s_tensor], dim=0)
+            sk_path = self.skel_paths[index]
+            if sk_path.endswith(".pt") and os.path.exists(sk_path):
+                k_uint8 = torch.load(sk_path, map_location="cpu")
+                sk_tensor = k_uint8.float().unsqueeze(0) / 255.0
+            elif os.path.exists(sk_path):
+                sk_img = Image.open(sk_path).convert("L")
+            else:
+                sk_img = None
         else:
+            sk_img = None
+
+        if s_img.size != (self.img_size, self.img_size):
+            s_img = s_img.resize((self.img_size, self.img_size), Image.BICUBIC)
+        if t_img.size != (self.img_size, self.img_size):
+            t_img = t_img.resize((self.img_size, self.img_size), Image.BICUBIC)
+        if sk_img and sk_img.size != (self.img_size, self.img_size):
+            sk_img = sk_img.resize((self.img_size, self.img_size), Image.BICUBIC)
+
+        if self.tsf_s:
+            s_img = self.tsf_s(s_img)
+        if self.tsf_t:
+            t_img = self.tsf_t(t_img)
+        if sk_img and self.tsf_k:
+            sk_img = self.tsf_k(sk_img)
+
+        s_tensor = self.norm(self.to_tensor(s_img))
+        t_tensor = self.norm(self.to_tensor(t_img))
+        if sk_tensor is None and sk_img is not None:
+            sk_tensor = self.norm(self.to_tensor(sk_img))
+        if sk_tensor is None:
             sk_tensor = torch.zeros(1, self.img_size, self.img_size)
-            s = self.norm(self.to_tensor(s))
-        t = self.norm(self.to_tensor(t))
-        return s, t, sk_tensor
+
+        sk_tensor = torch.where(sk_tensor > 0, 1.0, -1.0)
+        s_tensor = torch.cat([sk_tensor, s_tensor], dim=0) if self.skel_paths else s_tensor
+        return s_tensor, t_tensor, sk_tensor
 
 
 def get_norm_layer(norm_type: str = "instance") -> type[nn.Module]:
@@ -639,18 +666,22 @@ def train(config: dict) -> None:
     for epoch in range(1, config["epochs"] + 1):
         G.train()
         D.train()
+        w_stroke = 0.0
+        if config.get("stroke_lambda", 0) > 0:
+            w_stroke = config["stroke_lambda"] * 0.5 * (
+                1 + math.cos(math.pi * epoch / config["epochs"])
+            )
         pbar = tqdm(dl, desc=f"Epoch {epoch}/{config['epochs']}")
         for i, (src, real, ske) in enumerate(pbar):
             src, real, ske = src.to(device), real.to(device), ske.to(device)
             opt_g.zero_grad()
             with torch.cuda.amp.autocast(enabled=config["use_amp"]):
                 fake = G(src)
-                l_gan = cgan(D(src, fake), torch.ones_like(D(src, fake)))
+                l_gan = cgan(D(add_noise(src), add_noise(fake)), torch.ones_like(D(src, fake)))
                 l_l1 = cl1(fake, real) * config["l1_lambda"]
                 l_p = cperc(fake, real) * config["perceptual_lambda"]
                 if config.get("stroke_lambda", 0) > 0:
-                    fake_sk = skeletonize_tensor(fake)
-                    l_sk = F.l1_loss(fake_sk, ske) * config["stroke_lambda"]
+                    l_sk = stroke_loss(fake, ske) * w_stroke
                 else:
                     l_sk = torch.tensor(0.0, device=device)
                 l_g = (l_gan + l_l1 + l_p + l_sk) / config["accum_steps"]
@@ -665,8 +696,14 @@ def train(config: dict) -> None:
                 opt_g.zero_grad()
             opt_d.zero_grad()
             with torch.cuda.amp.autocast(enabled=config["use_amp"]):
-                l_dr = cgan(D(src, real), torch.ones_like(D(src, real)))
-                l_df = cgan(D(src, fake.detach()), torch.zeros_like(D(src, fake.detach())))
+                l_dr = cgan(
+                    D(add_noise(src), add_noise(real)),
+                    torch.ones_like(D(src, real)),
+                )
+                l_df = cgan(
+                    D(add_noise(src), add_noise(fake.detach())),
+                    torch.zeros_like(D(src, fake.detach())),
+                )
                 l_d = ((l_dr + l_df) * 0.5) / config["accum_steps"]
             scaler.scale(l_d).backward()
             if (i + 1) % config["accum_steps"] == 0:

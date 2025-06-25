@@ -120,4 +120,9 @@
 3. `scripts/prepare_skeleton_data.py` に ``--no_blur`` オプションを導入し前処理を選択可能に。
 4. ドキュメント `index.md` に新機能を追記。
 
+### version: 1.0.65 (PR #30)
+1. 骨格画像を .pt テンソルとして保存し `torch.load` で高速読み込みを実現。
+2. Sobel フィルタによる GPU ストローク損失とコサイン減衰スケジュールを導入。
+3. Discriminator 入力に微小ノイズを加え過学習を抑制。
+
 
