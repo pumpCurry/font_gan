@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.64 (PR #29)
+:version: 1.0.65 (PR #30)
 :since:   1.0.64 (PR #29)
-:last-modified: 2025-06-26 12:00:00 JST+9
+:last-modified: 2025-06-25 10:29:12 JST+9
 :todo:
     - Support batch rendering
 """
@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import os
 from typing import Dict
+import torch
 
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
@@ -87,14 +88,13 @@ def load_char_list_from_file(path: str) -> Dict[int, str]:
     return chars
 
 
-def create_skeleton_image(input_img_path: str, output_path: str, apply_blur: bool = True) -> None:
-    """Create 1px width skeleton image from glyph PNG.
-
-    Args:
-        input_img_path: Source glyph image path.
-        output_path: Destination path to save skeleton image.
-        apply_blur: Apply Gaussian blur prior to binarization.
-    """
+def create_skeleton_image(
+    input_img_path: str,
+    output_path: str,
+    apply_blur: bool = True,
+    pt_path: str | None = None,
+) -> None:
+    """Create 1px width skeleton image from glyph PNG and save tensor."""
     img = Image.open(input_img_path).convert("L")
     arr = np.array(img)
     if apply_blur:
@@ -105,6 +105,9 @@ def create_skeleton_image(input_img_path: str, output_path: str, apply_blur: boo
     skeleton = remove_small_objects(skeleton, min_size=10)
     skeleton_img = Image.fromarray((~skeleton * 255).astype(np.uint8))
     skeleton_img.save(output_path)
+    if pt_path:
+        tensor = torch.tensor(np.array(skeleton_img), dtype=torch.uint8)
+        torch.save(tensor, pt_path)
 
 
 def main() -> None:
@@ -132,7 +135,7 @@ def main() -> None:
     for img_file in tqdm(os.listdir(args.temp_dir), desc="Generating skeletons"):
         input_path = os.path.join(args.temp_dir, img_file)
         output_path = os.path.join(args.out_dir, img_file)
-        create_skeleton_image(input_path, output_path, apply_blur=not args.no_blur)
+        create_skeleton_image(input_path, output_path, apply_blur=not args.no_blur, pt_path=os.path.join(args.out_dir, os.path.splitext(img_file)[0] + ".pt"))
 
 
 if __name__ == "__main__":

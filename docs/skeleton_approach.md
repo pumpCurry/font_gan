@@ -15,6 +15,8 @@ python scripts/prepare_skeleton_data.py \
   --font fonts/base.otf \
   --char_list chars.txt \
   --out_dir data/skeleton
+
+生成された骨格は PNG とともに `.pt` 形式のテンソルも保存され、学習時に高速に読み込めます。
 ```
 
 ## 学習方法
