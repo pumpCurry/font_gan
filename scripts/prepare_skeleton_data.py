@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.60 (PR #27)
+:version: 1.0.62 (PR #28)
 :since:   1.0.60 (PR #27)
-:last-modified: 2025-06-23 09:40:00 JST+9
+:last-modified: 2025-06-25 09:45:00 JST+9
 :todo:
     - Support batch rendering
 """
@@ -22,7 +22,8 @@ from typing import Dict
 
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
-from skimage.morphology import skeletonize
+from skimage.filters import gaussian, threshold_otsu
+from skimage.morphology import skeletonize, remove_small_objects
 from skimage.util import invert
 from tqdm import tqdm
 
@@ -87,12 +88,19 @@ def load_char_list_from_file(path: str) -> Dict[int, str]:
 
 
 def create_skeleton_image(input_img_path: str, output_path: str) -> None:
-    """Create 1px width skeleton image from glyph PNG."""
+    """Create 1px width skeleton image from glyph PNG.
+
+    This function applies Gaussian blur and Otsu thresholding before
+    skeletonization and removes small objects to suppress noise.
+    """
     img = Image.open(input_img_path).convert("L")
-    img_inverted = invert(np.array(img))
-    binary_image = img_inverted > 128
+    arr = np.array(img)
+    blurred = gaussian(arr, sigma=0.7)
+    thresh = threshold_otsu(blurred)
+    binary_image = blurred < thresh
     skeleton = skeletonize(binary_image)
-    skeleton_img = Image.fromarray((~skeleton).astype(np.uint8))
+    skeleton = remove_small_objects(skeleton, min_size=10)
+    skeleton_img = Image.fromarray((~skeleton * 255).astype(np.uint8))
     skeleton_img.save(output_path)
 
 

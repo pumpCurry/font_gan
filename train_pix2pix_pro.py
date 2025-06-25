@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.50 (PR #22)
+:version: 1.0.62 (PR #28)
 :since:   1.0.30 (PR #14)
-:last-modified: 2025-06-23 09:40:00 JST+9
+:last-modified: 2025-06-25 09:45:00 JST+9
 :todo:
     - Improve configurability via YAML
 """
@@ -343,6 +343,7 @@ class FontPairDataset(Dataset):
         target_dir: str,
         transform_source_pil: callable | None = None,
         transform_target_pil: callable | None = None,
+        transform_skel_pil: callable | None = None,
         img_size: int = 256,
         is_stage2: bool = False,
         rehearsal_ratio: float = 0.0,
@@ -391,6 +392,7 @@ class FontPairDataset(Dataset):
 
         self.tsf_s = transform_source_pil
         self.tsf_t = transform_target_pil
+        self.tsf_k = transform_skel_pil
         self.to_tensor = T.ToTensor()
         self.norm = T.Normalize((0.5,), (0.5,))
         self.img_size = img_size
@@ -414,6 +416,8 @@ class FontPairDataset(Dataset):
             s = self.tsf_s(s)
         if self.tsf_t:
             t = self.tsf_t(t)
+        if sk and self.tsf_k:
+            sk = self.tsf_k(sk)
         if sk:
             sk = self.norm(self.to_tensor(sk))
             s = self.norm(self.to_tensor(s))
@@ -560,6 +564,7 @@ def train(config: dict) -> None:
         config["target_data_dir"],
         transform_source_pil=tf_s,
         transform_target_pil=tf_t,
+        transform_skel_pil=None,
         img_size=config["img_size"],
         is_stage2=config["stage_name"] == "progressive_512",
         rehearsal_ratio=config.get("rehearsal_ratio", 0.0),
@@ -571,6 +576,7 @@ def train(config: dict) -> None:
     val_ds = FontPairDataset(
         config["source_data_dir"],
         config["target_data_dir"],
+        transform_skel_pil=None,
         img_size=config["img_size"],
         char_codes=val_codes,
         skeleton_dir=config.get("skeleton_dir"),

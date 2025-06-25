@@ -10,6 +10,11 @@
 
 バージョン 1.0.60 では細線化した骨格画像を入力に加える ``--skeleton_dir`` オプションを導入しました。`scripts/prepare_skeleton_data.py` で生成した骨格画像を参考フォント画像と結合して学習させることで、ストローク構造の再現性を高めています。
 
+バージョン 1.0.62 では骨格生成時に Gaussian ブラーと Otsu 二値化を適用し、
+小さなノイズを除去した上で skeletonize するよう改良しました。データセット
+``FontPairDataset`` は骨格画像用の前処理を受け取れるようになり、2チャネル入力
+による簡易検証を進めやすくなっています。
+
 ## ドキュメント構成
 
 - [環境構築ガイド](installation.md)
@@ -25,6 +30,7 @@
 - [大解像度画像利用の検討](high_resolution.md)
 - [コード概要](code_overview.md)
 - [実装の概要](technical_details.md)
+- [骨格入力とスタイル分離](skeleton_approach.md)
 - [学習文字リストの管理](character_list.md)
 - [実験再現性とデバッグ](reproducibility.md)
 

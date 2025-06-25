@@ -57,7 +57,10 @@ python -c "from train_pix2pix import train_from_config; train_from_config('conf.
 python train_pix2pix_pro.py \
   --stage s1_256 \
   --ref_font ./fonts/reference_font.otf \
-  --target_font ./fonts/GD-HighwayGothicJA.otf
+  --target_font ./fonts/GD-HighwayGothicJA.otf \
+  --skeleton_dir ./data/skeleton
+
+``--skeleton_dir`` には ``prepare_skeleton_data.py`` で生成した骨格画像のディレクトリを指定します。指定しない場合は1チャネル入力となります。
 
 python train_pix2pix_pro.py \
   --stage s2_512 \
