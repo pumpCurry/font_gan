@@ -35,3 +35,5 @@ python train_pix2pix_pro.py \
 ```
 
 層化サンプリングにより検証データを選び、`torch.compile` が利用可能ならモデルを JIT コンパイルして高速化を試みます。
+
+学習を途中から再開する場合は `--resume_ckpt` にチェックポイントを指定します。早期停止させたい場合は `--early_stop_patience` を与え、学習率スケジューラを ``ReduceLROnPlateau`` に切り替えるには `--scheduler_type plateau` を指定します。

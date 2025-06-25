@@ -24,6 +24,8 @@
 
 バージョン 1.0.72 では ``prepare_data_step1_5.py`` が各サンプルのエッジ面積を保存し、``calculate_stats.py`` で平均値を取得できます。学習時には層化サンプリングで検証データを選び、``--use_compile`` オプションで ``torch.compile`` を試せます。
 
+バージョン 1.0.74 では Edge IoU の計算が最大値に対する比率で閾値を調整する方式となり、骨格前処理 ``prepare_skeleton_data.py`` が ``--workers`` で並列化に対応しました。学習スクリプトは ``--resume_ckpt`` による再開と ``--early_stop_patience`` ``--scheduler_type plateau`` による自動制御、``--val_metric_ratio`` で検証の計算量を抑える機能を追加しています。
+
 ## ドキュメント構成
 
 - [環境構築ガイド](installation.md)
