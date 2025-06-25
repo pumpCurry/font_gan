@@ -130,4 +130,9 @@
 2. `train_pix2pix_pro.py` が `--preprocessed_dir` で高速ローダーを利用可能に。
 3. 検証指標として Edge IoU を追加しストローク再現度を定量化。
 
+### version: 1.0.70 (PR #32)
+1. `PreprocessedFontDataset` が mmap 読み込みに対応し、メモリ効率を向上。
+2. 骨格損失をエッジ面積で正規化し、入力ノイズをエポックごとに減衰。
+3. 検証時に Mean_Edge_Width を記録し、ストロークの太さ誤差を把握可能に。
+
 
