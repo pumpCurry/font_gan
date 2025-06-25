@@ -18,6 +18,7 @@
 バージョン 1.0.64 では Discriminator の入力チャンネルを修正し、生成画像の細線化結果と骨格画像との L1 損失 ``stroke_lambda`` を追加しました。
 バージョン 1.0.65 では骨格画像を.pt 形式で保存し、Sobel フィルタを用いた GPU ストローク損失と Discriminator 入力ノイズを追加しました。骨格損失の重みはコサインスケジュールで減衰します。
 ``prepare_skeleton_data.py`` は ``--no_blur`` オプションで前処理を制御できます。
+バージョン 1.0.68 では画像ペアと骨格を一括保存する ``prepare_data_step1_5.py`` を追加し、``--preprocessed_dir`` から高速読み込みが可能になりました。評価指標に Edge IoU を導入しています。
 
 ## ドキュメント構成
 
@@ -37,4 +38,5 @@
 - [骨格入力とスタイル分離](skeleton_approach.md)
 - [学習文字リストの管理](character_list.md)
 - [実験再現性とデバッグ](reproducibility.md)
+- [高速前処理データセット](preprocessed_dataset.md)
 

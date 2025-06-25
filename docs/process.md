@@ -125,4 +125,9 @@
 2. Sobel フィルタによる GPU ストローク損失とコサイン減衰スケジュールを導入。
 3. Discriminator 入力に微小ノイズを加え過学習を抑制。
 
+### version: 1.0.68 (PR #31)
+1. 参考・ターゲット・骨格をまとめた `.pt` データを作成する `prepare_data_step1_5.py` を追加。
+2. `train_pix2pix_pro.py` が `--preprocessed_dir` で高速ローダーを利用可能に。
+3. 検証指標として Edge IoU を追加しストローク再現度を定量化。
+
 
