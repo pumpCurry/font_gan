@@ -15,6 +15,10 @@
 ``FontPairDataset`` は骨格画像用の前処理を受け取れるようになり、2チャネル入力
 による簡易検証を進めやすくなっています。
 
+バージョン 1.0.64 では Discriminator の入力チャンネルを修正し、
+生成画像の細線化結果と骨格画像との L1 損失 ``stroke_lambda`` を追加しました。
+``prepare_skeleton_data.py`` は ``--no_blur`` オプションで前処理を制御できます。
+
 ## ドキュメント構成
 
 - [環境構築ガイド](installation.md)
