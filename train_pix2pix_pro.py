@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.72 (PR #33)
+:version: 1.0.74 (PR #34)
 :since:   1.0.30 (PR #14)
-:last-modified: 2025-06-25 02:48:45 JST+9
+:last-modified: 2025-06-25 12:00:00 JST+9
 :todo:
     - Improve configurability via YAML
 """
@@ -298,7 +298,8 @@ def validate_epoch(
         ssims.append(metrics["ssim"])
         emap = edge_map(fake)
         ious.append(edge_iou(fake, ske).item())
-        widths.append(float(emap.mean().item()))
+        if random.random() < 0.25:
+            widths.append(float(emap.mean().item()))
         if first:
             grid = vutils.make_grid(
                 torch.cat([
@@ -314,7 +315,7 @@ def validate_epoch(
     avg_psnr = float(np.mean(psnrs))
     avg_ssim = float(np.mean(ssims))
     avg_iou = float(np.mean(ious))
-    avg_w = float(np.mean(widths))
+    avg_w = float(np.mean(widths)) if widths else 0.0
     writer.add_scalar("Validation/PSNR", avg_psnr, epoch)
     writer.add_scalar("Validation/SSIM", avg_ssim, epoch)
     writer.add_scalar("Validation/Edge_IoU", avg_iou, epoch)
@@ -384,8 +385,8 @@ def edge_map(x: torch.Tensor) -> torch.Tensor:
     """Return gradient magnitude via Sobel filter."""
     kx = _SOBEL_X.to(x.device)
     ky = _SOBEL_Y.to(x.device)
-    ex = F.conv2d(x, kx, padding=1)
-    ey = F.conv2d(x, ky, padding=1)
+    ex = F.conv2d(x, kx, padding="same")
+    ey = F.conv2d(x, ky, padding="same")
     return torch.sqrt(ex ** 2 + ey ** 2 + 1e-6)
 
 def stroke_loss(fake: torch.Tensor, ske: torch.Tensor) -> torch.Tensor:
@@ -393,10 +394,18 @@ def stroke_loss(fake: torch.Tensor, ske: torch.Tensor) -> torch.Tensor:
     return F.l1_loss(edge_map(fake), edge_map(ske))
 
 
-def edge_iou(fake: torch.Tensor, ske: torch.Tensor) -> torch.Tensor:
-    """Return IoU of edge maps."""
-    f = edge_map(fake) > 0.5
-    s = edge_map(ske) > 0.5
+def edge_iou(
+    fake: torch.Tensor,
+    ske: torch.Tensor,
+    thr_ratio: float = 0.25,
+) -> torch.Tensor:
+    """Return IoU of edge maps with adaptive threshold."""
+    fe = edge_map(fake)
+    se = edge_map(ske)
+    thr_f = fe.max() * thr_ratio
+    thr_s = se.max() * thr_ratio
+    f = fe > thr_f
+    s = se > thr_s
     inter = torch.sum(f & s, dim=(1, 2, 3)).float()
     union = torch.sum(f | s, dim=(1, 2, 3)).float()
     return torch.mean(inter / (union + 1e-6))
@@ -682,6 +691,9 @@ def train(config: dict) -> None:
         train_codes, val_codes = create_stratified_split(
             config["preprocessed_dir"], all_codes, config.get("val_split_ratio", 0.1)
         )
+        assert len(set(train_codes) & set(val_codes)) == 0, (
+            "Overlap detected between train and validation splits"
+        )
     else:
         val_size = int(len(all_codes) * config.get("val_split_ratio", 0.1))
         val_codes = all_codes[:val_size]
@@ -770,9 +782,20 @@ def train(config: dict) -> None:
     sched_g = CosineAnnealingLR(opt_g, T_max=config["epochs"], eta_min=1e-7)
     sched_d = CosineAnnealingLR(opt_d, T_max=config["epochs"], eta_min=1e-7)
     scaler = torch.cuda.amp.GradScaler(enabled=config["use_amp"])
+    if config.get("resume_ckpt"):
+        ckpt = torch.load(config["resume_ckpt"], map_location=device)
+        G.load_state_dict(ckpt["G"])
+        D.load_state_dict(ckpt.get("D", {}))
+        opt_g.load_state_dict(ckpt["opt_G"])
+        opt_d.load_state_dict(ckpt["opt_D"])
+        sched_g.load_state_dict(ckpt["sch_G"])
+        sched_d.load_state_dict(ckpt["sch_D"])
+        start_epoch = ckpt.get("epoch", 0) + 1
+    else:
+        start_epoch = 1
     step = 0
     best_psnr = 0.0
-    for epoch in range(1, config["epochs"] + 1):
+    for epoch in range(start_epoch, config["epochs"] + 1):
         G.train()
         D.train()
         base_sw = 0.0
@@ -783,7 +806,7 @@ def train(config: dict) -> None:
         pbar = tqdm(dl, desc=f"Epoch {epoch}/{config['epochs']}")
         for i, (src, real, ske) in enumerate(pbar):
             src, real, ske = src.to(device), real.to(device), ske.to(device)
-            cur_std = config.get("d_noise_std", 0.05) * max(0.0, 1 - epoch / config["epochs"])
+            cur_std = config.get("d_noise_std", 0.05) * (1 - epoch / config["epochs"])
             opt_g.zero_grad()
             with torch.cuda.amp.autocast(enabled=config["use_amp"]):
                 fake = G(src)
@@ -867,6 +890,18 @@ def train(config: dict) -> None:
         if epoch % config["save_epoch_freq"] == 0 or epoch == config["epochs"]:
             torch.save(G.state_dict(), os.path.join(model_dir, f"G_ep{epoch}.pth"))
             torch.save(D.state_dict(), os.path.join(model_dir, f"D_ep{epoch}.pth"))
+            torch.save(
+                {
+                    "G": G.state_dict(),
+                    "D": D.state_dict(),
+                    "opt_G": opt_g.state_dict(),
+                    "opt_D": opt_d.state_dict(),
+                    "sch_G": sched_g.state_dict(),
+                    "sch_D": sched_d.state_dict(),
+                    "epoch": epoch,
+                },
+                os.path.join(model_dir, f"ckpt_{epoch}.pth"),
+            )
     writer.close()
 
 
@@ -929,6 +964,12 @@ def main() -> None:
         action="store_true",
         help="Use torch.compile if available",
     )
+    parser.add_argument(
+        "--resume_ckpt",
+        type=str,
+        default=None,
+        help="Checkpoint path to resume training",
+    )
 
     args = parser.parse_args()
 
@@ -981,6 +1022,7 @@ def main() -> None:
         "preprocessed_dir": args.preprocessed_dir,
         "stroke_lambda": args.stroke_lambda,
         "use_compile": args.use_compile,
+        "resume_ckpt": args.resume_ckpt,
         "mean_edge_area": 0.07,
         "d_noise_std": 0.05,
     }

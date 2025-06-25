@@ -140,4 +140,9 @@
 2. `train_pix2pix_pro.py` は層化サンプリングで検証データを抽出し、`--use_compile` で `torch.compile` を試行可能に。
 3. ドキュメントに高度なワークフローを追記。
 
+### version: 1.0.74 (PR #34)
+1. Edge IoU のしきい値をバッチごとに調整し、Mean Edge Width を 25 % のバッチで計算。
+2. `prepare_skeleton_data.py` を並列化し、`torch.save(..., pickle_protocol=4)` を使用。
+3. 層化分割の重複を検証し、`--resume_ckpt` オプションで学習を途中から再開可能に。
+
 

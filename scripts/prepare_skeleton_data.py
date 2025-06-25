@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.70 (PR #32)
+:version: 1.0.74 (PR #34)
 :since:   1.0.64 (PR #29)
-:last-modified: 2025-06-25 11:12:16 JST+9
+:last-modified: 2025-06-25 12:00:00 JST+9
 :todo:
     - Support batch rendering
 """
@@ -27,6 +27,7 @@ from skimage.filters import gaussian, threshold_otsu
 from skimage.morphology import skeletonize, remove_small_objects
 from skimage.util import invert
 from tqdm import tqdm
+import multiprocessing as mp
 
 
 def render_char_to_png(font_path: str, char: str, out_path: str, size: int = 256) -> Image.Image:
@@ -107,7 +108,19 @@ def create_skeleton_image(
     skeleton_img.save(output_path)
     if pt_path:
         tensor = torch.tensor(np.array(skeleton_img), dtype=torch.uint8)
-        torch.save(tensor, pt_path)
+        torch.save(tensor, pt_path, pickle_protocol=4)
+
+
+def _job_render(args: tuple[str, str, str, int]) -> None:
+    """Worker for multiprocessing render."""
+    font, ch, path, size = args
+    render_char_to_png(font, ch, path, size)
+
+
+def _job_skeleton(args: tuple[str, str, bool, str]) -> None:
+    """Worker for multiprocessing skeleton generation."""
+    inp, out, blur, pt = args
+    create_skeleton_image(inp, out, apply_blur=blur, pt_path=pt)
 
 
 def main() -> None:
@@ -129,13 +142,36 @@ def main() -> None:
     os.makedirs(args.temp_dir, exist_ok=True)
 
     chars = load_char_list_from_file(args.char_list)
-    for code, ch in tqdm(chars.items(), desc="Rendering base font"):
-        render_char_to_png(args.font, ch, os.path.join(args.temp_dir, f"{code}.png"), size=args.size)
+    render_jobs = [
+        (args.font, ch, os.path.join(args.temp_dir, f"{code}.png"), args.size)
+        for code, ch in chars.items()
+    ]
+    with mp.Pool() as pool:
+        list(
+            tqdm(
+                pool.imap_unordered(_job_render, render_jobs),
+                total=len(render_jobs),
+                desc="Rendering base font",
+            )
+        )
 
-    for img_file in tqdm(os.listdir(args.temp_dir), desc="Generating skeletons"):
-        input_path = os.path.join(args.temp_dir, img_file)
-        output_path = os.path.join(args.out_dir, img_file)
-        create_skeleton_image(input_path, output_path, apply_blur=not args.no_blur, pt_path=os.path.join(args.out_dir, os.path.splitext(img_file)[0] + ".pt"))
+    skeleton_jobs = [
+        (
+            os.path.join(args.temp_dir, f),
+            os.path.join(args.out_dir, f),
+            not args.no_blur,
+            os.path.join(args.out_dir, os.path.splitext(f)[0] + ".pt"),
+        )
+        for f in os.listdir(args.temp_dir)
+    ]
+    with mp.Pool() as pool:
+        list(
+            tqdm(
+                pool.imap_unordered(_job_skeleton, skeleton_jobs),
+                total=len(skeleton_jobs),
+                desc="Generating skeletons",
+            )
+        )
 
 
 if __name__ == "__main__":
