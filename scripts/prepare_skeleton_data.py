@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.68 (PR #31)
+:version: 1.0.70 (PR #32)
 :since:   1.0.64 (PR #29)
-:last-modified: 2025-06-25 10:40:00 JST+9
+:last-modified: 2025-06-25 11:12:16 JST+9
 :todo:
     - Support batch rendering
 """

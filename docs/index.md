@@ -20,6 +20,8 @@
 ``prepare_skeleton_data.py`` は ``--no_blur`` オプションで前処理を制御できます。
 バージョン 1.0.68 では画像ペアと骨格を一括保存する ``prepare_data_step1_5.py`` を追加し、``--preprocessed_dir`` から高速読み込みが可能になりました。評価指標に Edge IoU を導入しています。
 
+バージョン 1.0.70 では ``PreprocessedFontDataset`` がメモリマップ読み込みに対応し、骨格損失の重みをエッジ面積で正規化します。Discriminator 入力ノイズをエポックに応じて減衰させ、検証指標 ``Mean_Edge_Width`` を追加しました。
+
 ## ドキュメント構成
 
 - [環境構築ガイド](installation.md)

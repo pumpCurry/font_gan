@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.68 (PR #31)
+:version: 1.0.70 (PR #32)
 :since:   1.0.30 (PR #14)
-:last-modified: 2025-06-25 10:40:00 JST+9
+:last-modified: 2025-06-25 11:12:16 JST+9
 :todo:
     - Improve configurability via YAML
 """
@@ -256,6 +256,7 @@ def validate_epoch(
     psnrs: list[float] = []
     ssims: list[float] = []
     ious: list[float] = []
+    widths: list[float] = []
     first = True
     vbar = tqdm(loader, desc=f"Validating Epoch {epoch}")
     for src, real, ske in vbar:
@@ -264,7 +265,9 @@ def validate_epoch(
         metrics = compute_metrics(fake, real)
         psnrs.append(metrics["psnr"])
         ssims.append(metrics["ssim"])
+        emap = edge_map(fake)
         ious.append(edge_iou(fake, ske).item())
+        widths.append(float(emap.mean().item()))
         if first:
             grid = vutils.make_grid(
                 torch.cat([
@@ -280,10 +283,14 @@ def validate_epoch(
     avg_psnr = float(np.mean(psnrs))
     avg_ssim = float(np.mean(ssims))
     avg_iou = float(np.mean(ious))
+    avg_w = float(np.mean(widths))
     writer.add_scalar("Validation/PSNR", avg_psnr, epoch)
     writer.add_scalar("Validation/SSIM", avg_ssim, epoch)
     writer.add_scalar("Validation/Edge_IoU", avg_iou, epoch)
-    print(f"Validation Epoch {epoch} -> Avg PSNR: {avg_psnr:.2f}, Avg SSIM: {avg_ssim:.3f}, Avg IoU: {avg_iou:.3f}")
+    writer.add_scalar("Validation/Mean_Edge_Width", avg_w, epoch)
+    print(
+        f"Validation Epoch {epoch} -> Avg PSNR: {avg_psnr:.2f}, Avg SSIM: {avg_ssim:.3f}, Avg IoU: {avg_iou:.3f}, Avg W: {avg_w:.3f}"
+    )
     return avg_psnr
 
 
@@ -501,7 +508,8 @@ class PreprocessedFontDataset(Dataset):
         return len(self.paths)
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        item = torch.load(self.paths[index], map_location="cpu")
+        # lazy-load with mmap で RAM 抑制
+        item = torch.load(self.paths[index], map_location="cpu", mmap=True)
         src = self.norm(item["source"].float() / 255.0)
         tgt = self.norm(item["target"].float() / 255.0)
         ske = self.norm(item["skeleton"].float() / 255.0)
@@ -728,21 +736,27 @@ def train(config: dict) -> None:
     for epoch in range(1, config["epochs"] + 1):
         G.train()
         D.train()
-        w_stroke = 0.0
+        base_sw = 0.0
         if config.get("stroke_lambda", 0) > 0:
-            w_stroke = config["stroke_lambda"] * 0.5 * (
+            base_sw = config["stroke_lambda"] * 0.5 * (
                 1 + math.cos(math.pi * epoch / config["epochs"])
             )
         pbar = tqdm(dl, desc=f"Epoch {epoch}/{config['epochs']}")
         for i, (src, real, ske) in enumerate(pbar):
             src, real, ske = src.to(device), real.to(device), ske.to(device)
+            cur_std = config.get("d_noise_std", 0.05) * max(0.0, 1 - epoch / config["epochs"])
             opt_g.zero_grad()
             with torch.cuda.amp.autocast(enabled=config["use_amp"]):
                 fake = G(src)
-                l_gan = cgan(D(add_noise(src), add_noise(fake)), torch.ones_like(D(src, fake)))
+                l_gan = cgan(
+                    D(add_noise(src, cur_std), add_noise(fake, cur_std)),
+                    torch.ones_like(D(src, fake)),
+                )
                 l_l1 = cl1(fake, real) * config["l1_lambda"]
                 l_p = cperc(fake, real) * config["perceptual_lambda"]
                 if config.get("stroke_lambda", 0) > 0:
+                    area = torch.mean(edge_map(ske)).item()
+                    w_stroke = base_sw * (area / config["mean_edge_area"])
                     l_sk = stroke_loss(fake, ske) * w_stroke
                 else:
                     l_sk = torch.tensor(0.0, device=device)
@@ -759,11 +773,11 @@ def train(config: dict) -> None:
             opt_d.zero_grad()
             with torch.cuda.amp.autocast(enabled=config["use_amp"]):
                 l_dr = cgan(
-                    D(add_noise(src), add_noise(real)),
+                    D(add_noise(src, cur_std), add_noise(real, cur_std)),
                     torch.ones_like(D(src, real)),
                 )
                 l_df = cgan(
-                    D(add_noise(src), add_noise(fake.detach())),
+                    D(add_noise(src, cur_std), add_noise(fake.detach(), cur_std)),
                     torch.zeros_like(D(src, fake.detach())),
                 )
                 l_d = ((l_dr + l_df) * 0.5) / config["accum_steps"]
@@ -922,6 +936,8 @@ def main() -> None:
         "skeleton_dir": args.skeleton_dir,
         "preprocessed_dir": args.preprocessed_dir,
         "stroke_lambda": args.stroke_lambda,
+        "mean_edge_area": 0.07,
+        "d_noise_std": 0.05,
     }
 
     if args.stage == "s1_256":
