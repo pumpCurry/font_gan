@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.68 (PR #31)
+:version: 1.0.72 (PR #33)
 :since:   1.0.68 (PR #31)
-:last-modified: 2025-06-25 10:40:00 JST+9
+:last-modified: 2025-06-25 02:48:45 JST+9
 :todo:
     - Support parallel processing
 """
@@ -27,6 +27,18 @@ from skimage.morphology import skeletonize
 from skimage.util import invert
 from skimage.filters import threshold_otsu
 from tqdm import tqdm
+
+_SOBEL_X = torch.tensor([[1, 0, -1], [2, 0, -2], [1, 0, -1]], dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+_SOBEL_Y = _SOBEL_X.transpose(-1, -2)
+
+
+def edge_map(x: torch.Tensor) -> torch.Tensor:
+    """Return Sobel gradient magnitude."""
+    kx = _SOBEL_X.to(x.device)
+    ky = _SOBEL_Y.to(x.device)
+    ex = torch.nn.functional.conv2d(x, kx, padding=1)
+    ey = torch.nn.functional.conv2d(x, ky, padding=1)
+    return torch.sqrt(ex ** 2 + ey ** 2 + 1e-6)
 
 
 def render_char_to_png(font_path: str, char: str, buffer_or_path: str | os.PathLike | None, size: int = 256) -> Image.Image:
@@ -70,8 +82,10 @@ def load_char_list_from_file(path: str) -> Dict[int, str]:
     return chars
 
 
-def create_images_and_skeleton(ref_font: str, tgt_font: str, ske_font: str, glyph: str, size: int) -> tuple[Image.Image, Image.Image, Image.Image]:
-    """Render three images and skeletonize the base font."""
+def create_images_and_skeleton(
+    ref_font: str, tgt_font: str, ske_font: str, glyph: str, size: int
+) -> tuple[Image.Image, Image.Image, Image.Image, float]:
+    """Render images and skeleton with edge statistics."""
     ref_img = render_char_to_png(ref_font, glyph, None, size=size)
     tgt_img = render_char_to_png(tgt_font, glyph, None, size=size)
     ske_base = render_char_to_png(ske_font, glyph, None, size=size)
@@ -80,7 +94,9 @@ def create_images_and_skeleton(ref_font: str, tgt_font: str, ske_font: str, glyp
     thresh = threshold_otsu(inv)
     skeleton = skeletonize(inv > thresh)
     ske_img = Image.fromarray((~skeleton).astype(np.uint8))
-    return ref_img, tgt_img, ske_img
+    k_tensor = torch.from_numpy(np.array(ske_img)).float().unsqueeze(0) / 255.0
+    edge_area = float(edge_map(k_tensor * 2.0 - 1.0).mean().item())
+    return ref_img, tgt_img, ske_img, edge_area
 
 
 def main() -> None:
@@ -101,13 +117,16 @@ def main() -> None:
     print(f"Processing {len(char_map)} characters for size {args.size}x{args.size}...")
     for code, glyph in tqdm(char_map.items(), desc="Preprocessing"):
         try:
-            ref_img, tgt_img, ske_img = create_images_and_skeleton(
+            ref_img, tgt_img, ske_img, area = create_images_and_skeleton(
                 args.ref_font, args.target_font, args.skeleton_base_font, glyph, args.size
             )
             r = torch.from_numpy(np.array(ref_img)).to(torch.uint8).unsqueeze(0)
             t = torch.from_numpy(np.array(tgt_img)).to(torch.uint8).unsqueeze(0)
             k = torch.from_numpy(np.array(ske_img)).to(torch.uint8).unsqueeze(0)
-            torch.save({"source": r, "target": t, "skeleton": k}, os.path.join(out_dir, f"{code}.pt"))
+            torch.save(
+                {"source": r, "target": t, "skeleton": k, "edge_area": area},
+                os.path.join(out_dir, f"{code}.pt"),
+            )
         except Exception as exc:
             print(f"[Error] Failed to process U+{code:04X} ({glyph}): {exc}")
     print(f"\nPreprocessing complete. Data saved to: {out_dir}")
