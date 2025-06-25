@@ -109,4 +109,9 @@
 2. `train_pix2pix_pro.py` に ``--skeleton_dir`` オプションと対応データセット処理を実装。
 3. ドキュメントに骨格入力の仕組みを追記し、ストローク構造を意識した学習方法を整理。
 
+### version: 1.0.62 (PR #28)
+1. 骨格生成処理にGaussianブラーとOtsu二値化を追加しノイズを除去。
+2. `FontPairDataset` が骨格画像用Transformを受け取り2チャネル学習を柔軟化。
+3. ドキュメントを整理し `skeleton_approach.md` を新設。
+
 
