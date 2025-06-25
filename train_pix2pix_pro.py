@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.70 (PR #32)
+:version: 1.0.72 (PR #33)
 :since:   1.0.30 (PR #14)
-:last-modified: 2025-06-25 11:12:16 JST+9
+:last-modified: 2025-06-25 02:48:45 JST+9
 :todo:
     - Improve configurability via YAML
 """
@@ -230,6 +230,37 @@ def compute_metrics(fake: torch.Tensor, real: torch.Tensor) -> dict:
             win -= 1
         ssim_vals.append(calc_ssim(r_img, f_img, data_range=1.0, win_size=win))
     return {"psnr": float(np.mean(psnr_vals)), "ssim": float(np.mean(ssim_vals))}
+
+
+def create_stratified_split(
+    data_dir: str, char_codes_all: list[int], val_split_ratio: float, n_bins: int = 5
+) -> tuple[list[int], list[int]]:
+    """Split codes into train/val using edge area stratification."""
+    stats = []
+    for code in char_codes_all:
+        path = os.path.join(data_dir, f"{code}.pt")
+        if not os.path.exists(path):
+            continue
+        item = torch.load(path, map_location="cpu", mmap=True)
+        area = item.get("edge_area")
+        if area is None and "skeleton" in item:
+            ske = item["skeleton"].float().unsqueeze(0) / 255.0
+            area = float(edge_map(ske * 2.0 - 1.0).mean().item())
+        stats.append({"code": code, "edge_area": area or 0.0})
+    if not stats:
+        return char_codes_all, []
+    areas = np.array([s["edge_area"] for s in stats])
+    bins = np.linspace(areas.min(), areas.max(), n_bins + 1)
+    binned = np.digitize(areas, bins)
+    train_codes: list[int] = []
+    val_codes: list[int] = []
+    for idx in range(1, n_bins + 1):
+        codes_in_bin = [stats[i]["code"] for i, b in enumerate(binned) if b == idx]
+        random.shuffle(codes_in_bin)
+        val_size = int(len(codes_in_bin) * val_split_ratio)
+        val_codes.extend(codes_in_bin[:val_size])
+        train_codes.extend(codes_in_bin[val_size:])
+    return train_codes, val_codes
 
 
 @torch.no_grad()
@@ -647,9 +678,14 @@ def train(config: dict) -> None:
         all_codes = list(char_map.keys())
 
     random.shuffle(all_codes)
-    val_size = int(len(all_codes) * config.get("val_split_ratio", 0.1))
-    val_codes = all_codes[:val_size]
-    train_codes = all_codes[val_size:]
+    if config.get("preprocessed_dir"):
+        train_codes, val_codes = create_stratified_split(
+            config["preprocessed_dir"], all_codes, config.get("val_split_ratio", 0.1)
+        )
+    else:
+        val_size = int(len(all_codes) * config.get("val_split_ratio", 0.1))
+        val_codes = all_codes[:val_size]
+        train_codes = all_codes[val_size:]
     print(f"[Info] Data split -> Train: {len(train_codes)}, Validation: {len(val_codes)}")
 
     tf_s = T.Compose(
@@ -708,6 +744,9 @@ def train(config: dict) -> None:
     )
     in_nc = 2 if config.get("skeleton_dir") else 1
     G = UNetGenerator(in_nc=in_nc, num_downs=config["num_unet_downs"], norm_type=config["norm_type"]).to(device)
+    if config.get("use_compile") and hasattr(torch, "compile"):
+        print("[Info] Compiling Generator with torch.compile")
+        G = torch.compile(G)
     D = PatchDiscriminator(in_nc=in_nc + 1, n_layers=config["d_n_layers"], norm_type=config["norm_type"]).to(device)
     if config.get("load_G_path"):
         G.load_state_dict(torch.load(config["load_G_path"], map_location=device))
@@ -885,6 +924,11 @@ def main() -> None:
         default=0.0,
         help="Weight for stroke consistency loss",
     )
+    parser.add_argument(
+        "--use_compile",
+        action="store_true",
+        help="Use torch.compile if available",
+    )
 
     args = parser.parse_args()
 
@@ -936,6 +980,7 @@ def main() -> None:
         "skeleton_dir": args.skeleton_dir,
         "preprocessed_dir": args.preprocessed_dir,
         "stroke_lambda": args.stroke_lambda,
+        "use_compile": args.use_compile,
         "mean_edge_area": 0.07,
         "d_noise_std": 0.05,
     }

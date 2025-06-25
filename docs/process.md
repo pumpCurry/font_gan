@@ -135,4 +135,9 @@
 2. 骨格損失をエッジ面積で正規化し、入力ノイズをエポックごとに減衰。
 3. 検証時に Mean_Edge_Width を記録し、ストロークの太さ誤差を把握可能に。
 
+### version: 1.0.72 (PR #33)
+1. `prepare_data_step1_5.py` がエッジ面積を保存し、`calculate_stats.py` で平均値を算出。
+2. `train_pix2pix_pro.py` は層化サンプリングで検証データを抽出し、`--use_compile` で `torch.compile` を試行可能に。
+3. ドキュメントに高度なワークフローを追記。
+
 

@@ -22,6 +22,8 @@
 
 バージョン 1.0.70 では ``PreprocessedFontDataset`` がメモリマップ読み込みに対応し、骨格損失の重みをエッジ面積で正規化します。Discriminator 入力ノイズをエポックに応じて減衰させ、検証指標 ``Mean_Edge_Width`` を追加しました。
 
+バージョン 1.0.72 では ``prepare_data_step1_5.py`` が各サンプルのエッジ面積を保存し、``calculate_stats.py`` で平均値を取得できます。学習時には層化サンプリングで検証データを選び、``--use_compile`` オプションで ``torch.compile`` を試せます。
+
 ## ドキュメント構成
 
 - [環境構築ガイド](installation.md)
@@ -41,4 +43,5 @@
 - [学習文字リストの管理](character_list.md)
 - [実験再現性とデバッグ](reproducibility.md)
 - [高速前処理データセット](preprocessed_dataset.md)
+- [高度なワークフロー](advanced_workflow.md)
 
