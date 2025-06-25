@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.72 (PR #33)
+:version: 1.0.74 (PR #34)
 :since:   1.0.30 (PR #14)
-:last-modified: 2025-06-25 02:48:45 JST+9
+:last-modified: 2025-06-25 12:00:00 JST+9
 :todo:
     - Improve configurability via YAML
 """
@@ -33,7 +33,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 import torchvision.transforms as T
 import torchvision.models as models
 import torchvision.utils as vutils
@@ -270,6 +270,7 @@ def validate_epoch(
     device: torch.device,
     writer: SummaryWriter,
     epoch: int,
+    metric_ratio: float = 1.0,
 ) -> float:
     """Run validation and log metrics.
 
@@ -290,15 +291,17 @@ def validate_epoch(
     widths: list[float] = []
     first = True
     vbar = tqdm(loader, desc=f"Validating Epoch {epoch}")
-    for src, real, ske in vbar:
+    max_b = int(len(loader) * metric_ratio)
+    for i, (src, real, ske) in enumerate(vbar):
         src, real, ske = src.to(device), real.to(device), ske.to(device)
         fake = generator(src)
         metrics = compute_metrics(fake, real)
         psnrs.append(metrics["psnr"])
         ssims.append(metrics["ssim"])
-        emap = edge_map(fake)
-        ious.append(edge_iou(fake, ske).item())
-        widths.append(float(emap.mean().item()))
+        if i < max_b:
+            emap = edge_map(fake)
+            ious.append(edge_iou(fake, ske).item())
+            widths.append(float(emap.mean().item()))
         if first:
             grid = vutils.make_grid(
                 torch.cat([
@@ -313,8 +316,8 @@ def validate_epoch(
 
     avg_psnr = float(np.mean(psnrs))
     avg_ssim = float(np.mean(ssims))
-    avg_iou = float(np.mean(ious))
-    avg_w = float(np.mean(widths))
+    avg_iou = float(np.mean(ious)) if ious else 0.0
+    avg_w = float(np.mean(widths)) if widths else 0.0
     writer.add_scalar("Validation/PSNR", avg_psnr, epoch)
     writer.add_scalar("Validation/SSIM", avg_ssim, epoch)
     writer.add_scalar("Validation/Edge_IoU", avg_iou, epoch)
@@ -393,10 +396,16 @@ def stroke_loss(fake: torch.Tensor, ske: torch.Tensor) -> torch.Tensor:
     return F.l1_loss(edge_map(fake), edge_map(ske))
 
 
-def edge_iou(fake: torch.Tensor, ske: torch.Tensor) -> torch.Tensor:
-    """Return IoU of edge maps."""
-    f = edge_map(fake) > 0.5
-    s = edge_map(ske) > 0.5
+def edge_iou(
+    fake: torch.Tensor, ske: torch.Tensor, thr_ratio: float = 0.25
+) -> torch.Tensor:
+    """Return IoU of edge maps with adaptive thresholds."""
+    fe = edge_map(fake)
+    se = edge_map(ske)
+    thr_f = fe.amax(dim=(-1, -2), keepdim=True) * thr_ratio
+    thr_s = se.amax(dim=(-1, -2), keepdim=True) * thr_ratio
+    f = fe > thr_f
+    s = se > thr_s
     inter = torch.sum(f & s, dim=(1, 2, 3)).float()
     union = torch.sum(f | s, dim=(1, 2, 3)).float()
     return torch.mean(inter / (union + 1e-6))
@@ -686,6 +695,7 @@ def train(config: dict) -> None:
         val_size = int(len(all_codes) * config.get("val_split_ratio", 0.1))
         val_codes = all_codes[:val_size]
         train_codes = all_codes[val_size:]
+    assert not set(train_codes) & set(val_codes), "Overlap detected between train and validation sets"
     print(f"[Info] Data split -> Train: {len(train_codes)}, Validation: {len(val_codes)}")
 
     tf_s = T.Compose(
@@ -767,12 +777,32 @@ def train(config: dict) -> None:
     cperc = VGGPerceptualLoss().to(device)
     opt_g = optim.Adam(filter(lambda p: p.requires_grad, G.parameters()), lr=config["lr_G"], betas=(0.5, 0.999))
     opt_d = optim.Adam(D.parameters(), lr=config["lr_D"], betas=(0.5, 0.999))
-    sched_g = CosineAnnealingLR(opt_g, T_max=config["epochs"], eta_min=1e-7)
-    sched_d = CosineAnnealingLR(opt_d, T_max=config["epochs"], eta_min=1e-7)
+    if config.get("scheduler_type", "cosine") == "plateau":
+        sched_g = ReduceLROnPlateau(
+            opt_g, mode="max", patience=config.get("plateau_patience", 10), factor=0.5
+        )
+        sched_d = ReduceLROnPlateau(
+            opt_d, mode="max", patience=config.get("plateau_patience", 10), factor=0.5
+        )
+    else:
+        sched_g = CosineAnnealingLR(opt_g, T_max=config["epochs"], eta_min=1e-7)
+        sched_d = CosineAnnealingLR(opt_d, T_max=config["epochs"], eta_min=1e-7)
     scaler = torch.cuda.amp.GradScaler(enabled=config["use_amp"])
     step = 0
     best_psnr = 0.0
-    for epoch in range(1, config["epochs"] + 1):
+    start_epoch = 1
+    if config.get("resume_ckpt"):
+        print(f"[Info] Resuming from {config['resume_ckpt']}")
+        ckpt = torch.load(config["resume_ckpt"], map_location=device)
+        G.load_state_dict(ckpt["G_state_dict"])
+        D.load_state_dict(ckpt["D_state_dict"])
+        opt_g.load_state_dict(ckpt["opt_G"])
+        opt_d.load_state_dict(ckpt["opt_D"])
+        start_epoch = ckpt.get("epoch", 0) + 1
+        best_psnr = ckpt.get("best_psnr", 0.0)
+        step = ckpt.get("global_step", 0)
+    epochs_no_improve = 0
+    for epoch in range(start_epoch, config["epochs"] + 1):
         G.train()
         D.train()
         base_sw = 0.0
@@ -854,19 +884,59 @@ def train(config: dict) -> None:
                     step,
                 )
             step += 1
-        sched_g.step()
-        sched_d.step()
-
-        avg_psnr = validate_epoch(G, val_dl, device, writer, epoch)
+        avg_psnr = validate_epoch(
+            G, val_dl, device, writer, epoch, config.get("val_metric_ratio", 1.0)
+        )
+        if isinstance(sched_g, ReduceLROnPlateau):
+            sched_g.step(avg_psnr)
+            sched_d.step(avg_psnr)
+        else:
+            sched_g.step()
+            sched_d.step()
         if avg_psnr > best_psnr:
             best_psnr = avg_psnr
-            torch.save(G.state_dict(), os.path.join(model_dir, "G_best.pth"))
-            torch.save(D.state_dict(), os.path.join(model_dir, "D_best.pth"))
+            epochs_no_improve = 0
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "global_step": step,
+                    "best_psnr": best_psnr,
+                    "G_state_dict": G.state_dict(),
+                    "D_state_dict": D.state_dict(),
+                    "opt_G": opt_g.state_dict(),
+                    "opt_D": opt_d.state_dict(),
+                    "sch_G": sched_g.state_dict(),
+                    "sch_D": sched_d.state_dict(),
+                },
+                os.path.join(model_dir, "ckpt_best.pth"),
+            )
             print(f"\u2728 New best model saved with PSNR: {best_psnr:.2f}")
+        else:
+            epochs_no_improve += 1
+            if (
+                config.get("early_stop_patience")
+                and epochs_no_improve >= config["early_stop_patience"]
+            ):
+                print(
+                    f"Early stopping triggered after {epochs_no_improve} epochs with no improvement."
+                )
+                break
 
         if epoch % config["save_epoch_freq"] == 0 or epoch == config["epochs"]:
-            torch.save(G.state_dict(), os.path.join(model_dir, f"G_ep{epoch}.pth"))
-            torch.save(D.state_dict(), os.path.join(model_dir, f"D_ep{epoch}.pth"))
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "global_step": step,
+                    "best_psnr": best_psnr,
+                    "G_state_dict": G.state_dict(),
+                    "D_state_dict": D.state_dict(),
+                    "opt_G": opt_g.state_dict(),
+                    "opt_D": opt_d.state_dict(),
+                    "sch_G": sched_g.state_dict(),
+                    "sch_D": sched_d.state_dict(),
+                },
+                os.path.join(model_dir, f"ckpt_ep{epoch}.pth"),
+            )
     writer.close()
 
 
@@ -929,6 +999,30 @@ def main() -> None:
         action="store_true",
         help="Use torch.compile if available",
     )
+    parser.add_argument(
+        "--resume_ckpt",
+        type=str,
+        default=None,
+        help="Checkpoint path to resume training",
+    )
+    parser.add_argument(
+        "--early_stop_patience",
+        type=int,
+        default=None,
+        help="Epochs to wait for improvement before stopping",
+    )
+    parser.add_argument(
+        "--scheduler_type",
+        choices=["cosine", "plateau"],
+        default="cosine",
+        help="Type of LR scheduler",
+    )
+    parser.add_argument(
+        "--val_metric_ratio",
+        type=float,
+        default=1.0,
+        help="Fraction of validation batches for heavy metrics",
+    )
 
     args = parser.parse_args()
 
@@ -981,6 +1075,11 @@ def main() -> None:
         "preprocessed_dir": args.preprocessed_dir,
         "stroke_lambda": args.stroke_lambda,
         "use_compile": args.use_compile,
+        "resume_ckpt": args.resume_ckpt,
+        "early_stop_patience": args.early_stop_patience,
+        "scheduler_type": args.scheduler_type,
+        "plateau_patience": args.early_stop_patience,
+        "val_metric_ratio": args.val_metric_ratio,
         "mean_edge_area": 0.07,
         "d_noise_std": 0.05,
     }
