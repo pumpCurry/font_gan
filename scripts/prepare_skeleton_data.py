@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.62 (PR #28)
-:since:   1.0.60 (PR #27)
-:last-modified: 2025-06-25 09:45:00 JST+9
+:version: 1.0.64 (PR #29)
+:since:   1.0.64 (PR #29)
+:last-modified: 2025-06-26 12:00:00 JST+9
 :todo:
     - Support batch rendering
 """
@@ -87,17 +87,20 @@ def load_char_list_from_file(path: str) -> Dict[int, str]:
     return chars
 
 
-def create_skeleton_image(input_img_path: str, output_path: str) -> None:
+def create_skeleton_image(input_img_path: str, output_path: str, apply_blur: bool = True) -> None:
     """Create 1px width skeleton image from glyph PNG.
 
-    This function applies Gaussian blur and Otsu thresholding before
-    skeletonization and removes small objects to suppress noise.
+    Args:
+        input_img_path: Source glyph image path.
+        output_path: Destination path to save skeleton image.
+        apply_blur: Apply Gaussian blur prior to binarization.
     """
     img = Image.open(input_img_path).convert("L")
     arr = np.array(img)
-    blurred = gaussian(arr, sigma=0.7)
-    thresh = threshold_otsu(blurred)
-    binary_image = blurred < thresh
+    if apply_blur:
+        arr = gaussian(arr, sigma=0.7)
+    thresh = threshold_otsu(arr)
+    binary_image = arr < thresh
     skeleton = skeletonize(binary_image)
     skeleton = remove_small_objects(skeleton, min_size=10)
     skeleton_img = Image.fromarray((~skeleton * 255).astype(np.uint8))
@@ -112,6 +115,11 @@ def main() -> None:
     parser.add_argument("--out_dir", type=str, required=True, help="Output directory")
     parser.add_argument("--temp_dir", type=str, default="./temp_render", help="Temporary render dir")
     parser.add_argument("--size", type=int, default=256, help="Render size")
+    parser.add_argument(
+        "--no_blur",
+        action="store_true",
+        help="Disable Gaussian blur preprocessing",
+    )
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -124,7 +132,7 @@ def main() -> None:
     for img_file in tqdm(os.listdir(args.temp_dir), desc="Generating skeletons"):
         input_path = os.path.join(args.temp_dir, img_file)
         output_path = os.path.join(args.out_dir, img_file)
-        create_skeleton_image(input_path, output_path)
+        create_skeleton_image(input_path, output_path, apply_blur=not args.no_blur)
 
 
 if __name__ == "__main__":

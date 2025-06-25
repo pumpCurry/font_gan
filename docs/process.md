@@ -114,4 +114,10 @@
 2. `FontPairDataset` が骨格画像用Transformを受け取り2チャネル学習を柔軟化。
 3. ドキュメントを整理し `skeleton_approach.md` を新設。
 
+### version: 1.0.64 (PR #29)
+1. Discriminator の入力チャネルを `[ske,ref]` + `[real/fake]` の3chに修正。
+2. 生成画像の細線化結果と骨格画像で L1 損失を計算する ``stroke_lambda`` を追加。
+3. `scripts/prepare_skeleton_data.py` に ``--no_blur`` オプションを導入し前処理を選択可能に。
+4. ドキュメント `index.md` に新機能を追記。
+
 

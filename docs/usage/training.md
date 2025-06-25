@@ -61,6 +61,7 @@ python train_pix2pix_pro.py \
   --skeleton_dir ./data/skeleton
 
 ``--skeleton_dir`` には ``prepare_skeleton_data.py`` で生成した骨格画像のディレクトリを指定します。指定しない場合は1チャネル入力となります。
+ストローク損失 ``--stroke_lambda`` を与えると、生成画像の細線化結果と骨格画像の L1 距離を損失に加えます。
 
 python train_pix2pix_pro.py \
   --stage s2_512 \

@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.62 (PR #28)
+:version: 1.0.64 (PR #29)
 :since:   1.0.30 (PR #14)
-:last-modified: 2025-06-25 09:45:00 JST+9
+:last-modified: 2025-06-26 12:00:00 JST+9
 :todo:
     - Improve configurability via YAML
 """
@@ -38,6 +38,7 @@ import torchvision.models as models
 import torchvision.utils as vutils
 from tqdm import tqdm
 from skimage.metrics import peak_signal_noise_ratio as calc_psnr
+from skimage.morphology import skeletonize
 from skimage.metrics import structural_similarity as calc_ssim
 from scipy.ndimage import binary_dilation, binary_erosion
 
@@ -255,8 +256,8 @@ def validate_epoch(
     ssims: list[float] = []
     first = True
     vbar = tqdm(loader, desc=f"Validating Epoch {epoch}")
-    for src, real in vbar:
-        src, real = src.to(device), real.to(device)
+    for src, real, ske in vbar:
+        src, real, ske = src.to(device), real.to(device), ske.to(device)
         fake = generator(src)
         metrics = compute_metrics(fake, real)
         psnrs.append(metrics["psnr"])
@@ -334,6 +335,17 @@ def morphology_transform(img: Image.Image, min_shift: int = 1, max_shift: int = 
     return Image.fromarray(out)
 
 
+def skeletonize_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    """Return a skeletonized version of ``tensor`` for stroke loss."""
+    np_t = tensor.cpu().detach().numpy()
+    out = np.zeros_like(np_t)
+    for i in range(np_t.shape[0]):
+        binary = np_t[i, 0] > -0.8
+        sk = skeletonize(binary)
+        out[i, 0] = sk.astype(np.float32)
+    return torch.from_numpy(out).to(tensor.device)
+
+
 class FontPairDataset(Dataset):
     """Provide paired font images as ``torch.utils.data.Dataset``."""
 
@@ -400,7 +412,8 @@ class FontPairDataset(Dataset):
     def __len__(self) -> int:
         return len(self.src_paths)
 
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return input tensor, target tensor, and skeleton tensor."""
         s = Image.open(self.src_paths[index]).convert("L")
         t = Image.open(self.tgt_paths[index]).convert("L")
         sk = None
@@ -419,13 +432,14 @@ class FontPairDataset(Dataset):
         if sk and self.tsf_k:
             sk = self.tsf_k(sk)
         if sk:
-            sk = self.norm(self.to_tensor(sk))
-            s = self.norm(self.to_tensor(s))
-            s = torch.cat([sk, s], dim=0)
+            sk_tensor = self.norm(self.to_tensor(sk))
+            s_tensor = self.norm(self.to_tensor(s))
+            s = torch.cat([sk_tensor, s_tensor], dim=0)
         else:
+            sk_tensor = torch.zeros(1, self.img_size, self.img_size)
             s = self.norm(self.to_tensor(s))
         t = self.norm(self.to_tensor(t))
-        return s, t
+        return s, t, sk_tensor
 
 
 def get_norm_layer(norm_type: str = "instance") -> type[nn.Module]:
@@ -626,15 +640,20 @@ def train(config: dict) -> None:
         G.train()
         D.train()
         pbar = tqdm(dl, desc=f"Epoch {epoch}/{config['epochs']}")
-        for i, (src, real) in enumerate(pbar):
-            src, real = src.to(device), real.to(device)
+        for i, (src, real, ske) in enumerate(pbar):
+            src, real, ske = src.to(device), real.to(device), ske.to(device)
             opt_g.zero_grad()
             with torch.cuda.amp.autocast(enabled=config["use_amp"]):
                 fake = G(src)
                 l_gan = cgan(D(src, fake), torch.ones_like(D(src, fake)))
                 l_l1 = cl1(fake, real) * config["l1_lambda"]
                 l_p = cperc(fake, real) * config["perceptual_lambda"]
-                l_g = (l_gan + l_l1 + l_p) / config["accum_steps"]
+                if config.get("stroke_lambda", 0) > 0:
+                    fake_sk = skeletonize_tensor(fake)
+                    l_sk = F.l1_loss(fake_sk, ske) * config["stroke_lambda"]
+                else:
+                    l_sk = torch.tensor(0.0, device=device)
+                l_g = (l_gan + l_l1 + l_p + l_sk) / config["accum_steps"]
             scaler.scale(l_g).backward()
             if (i + 1) % config["accum_steps"] == 0:
                 scaler.unscale_(opt_g)
@@ -660,18 +679,21 @@ def train(config: dict) -> None:
                 opt_d.zero_grad()
             if step % config["log_freq"] == 0:
                 mets = compute_metrics(fake, real)
-                pbar.set_postfix(
-                    {
-                        "L_D": f"{l_d.item()*config['accum_steps']:.3f}",
-                        "L_G": f"{(l_gan + l_l1 + l_p).item():.3f}",
-                        "PSNR": f"{mets['psnr']:.2f}",
-                        "SSIM": f"{mets['ssim']:.3f}",
-                    }
-                )
+                post = {
+                    "L_D": f"{l_d.item()*config['accum_steps']:.3f}",
+                    "L_G": f"{(l_gan + l_l1 + l_p).item():.3f}",
+                    "PSNR": f"{mets['psnr']:.2f}",
+                    "SSIM": f"{mets['ssim']:.3f}",
+                }
+                if config.get("stroke_lambda", 0) > 0:
+                    post["L_G_stroke"] = f"{l_sk.item():.3f}"
+                pbar.set_postfix(post)
                 writer.add_scalar("Loss/D", l_d.item() * config["accum_steps"], step)
                 writer.add_scalar("Loss/G_GAN", l_gan.item(), step)
                 writer.add_scalar("Loss/G_L1", l_l1.item(), step)
                 writer.add_scalar("Loss/G_Perceptual", l_p.item(), step)
+                if config.get("stroke_lambda", 0) > 0:
+                    writer.add_scalar("Loss/G_Stroke", l_sk.item(), step)
                 writer.add_scalar("Metrics/PSNR", mets["psnr"], step)
                 writer.add_scalar("Metrics/SSIM", mets["ssim"], step)
                 writer.add_scalar(
@@ -743,6 +765,12 @@ def main() -> None:
     )
     parser.add_argument("--batch_size", type=int, default=None, help="Batch size override")
     parser.add_argument("--skeleton_dir", type=str, default=None, help="Directory of skeleton images")
+    parser.add_argument(
+        "--stroke_lambda",
+        type=float,
+        default=0.0,
+        help="Weight for stroke consistency loss",
+    )
 
     args = parser.parse_args()
 
@@ -792,6 +820,7 @@ def main() -> None:
         "learning_list_file": args.char_list,
         "checkpoint_dir": args.checkpoint_dir,
         "skeleton_dir": args.skeleton_dir,
+        "stroke_lambda": args.stroke_lambda,
     }
 
     if args.stage == "s1_256":
