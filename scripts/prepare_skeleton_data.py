@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.74 (PR #34)
+:version: 1.0.76 (PR #35)
 :since:   1.0.64 (PR #29)
-:last-modified: 2025-06-25 12:00:00 JST+9
+:last-modified: 2025-06-25 05:29:54 JST+9
 :todo:
     - Support batch rendering
 """
@@ -108,7 +108,7 @@ def create_skeleton_image(
     skeleton_img.save(output_path)
     if pt_path:
         tensor = torch.tensor(np.array(skeleton_img), dtype=torch.uint8)
-        torch.save(tensor, pt_path)
+        torch.save(tensor, pt_path, pickle_protocol=4)
 
 
 def _worker(args_tuple: tuple[str, str, bool, str | None]) -> None:

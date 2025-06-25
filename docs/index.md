@@ -26,6 +26,8 @@
 
 バージョン 1.0.74 では Edge IoU の計算が最大値に対する比率で閾値を調整する方式となり、骨格前処理 ``prepare_skeleton_data.py`` が ``--workers`` で並列化に対応しました。学習スクリプトは ``--resume_ckpt`` による再開と ``--early_stop_patience`` ``--scheduler_type plateau`` による自動制御、``--val_metric_ratio`` で検証の計算量を抑える機能を追加しています。
 
+バージョン 1.0.76 では骨格テンソル保存時に ``pickle_protocol=4`` を使用し、Edge IoU の適応しきい値と入力ノイズの線形減衰を整理しました。学習・検証の重複文字を ``assert`` で検出し、``Mean_Edge_Width`` はランダム 25 % のバッチのみ計測します。
+
 ## ドキュメント構成
 
 - [環境構築ガイド](installation.md)
