@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.65 (PR #30)
+:version: 1.0.68 (PR #31)
 :since:   1.0.30 (PR #14)
-:last-modified: 2025-06-25 10:29:12 JST+9
+:last-modified: 2025-06-25 10:40:00 JST+9
 :todo:
     - Improve configurability via YAML
 """
@@ -255,6 +255,7 @@ def validate_epoch(
     generator.eval()
     psnrs: list[float] = []
     ssims: list[float] = []
+    ious: list[float] = []
     first = True
     vbar = tqdm(loader, desc=f"Validating Epoch {epoch}")
     for src, real, ske in vbar:
@@ -263,6 +264,7 @@ def validate_epoch(
         metrics = compute_metrics(fake, real)
         psnrs.append(metrics["psnr"])
         ssims.append(metrics["ssim"])
+        ious.append(edge_iou(fake, ske).item())
         if first:
             grid = vutils.make_grid(
                 torch.cat([
@@ -277,9 +279,11 @@ def validate_epoch(
 
     avg_psnr = float(np.mean(psnrs))
     avg_ssim = float(np.mean(ssims))
+    avg_iou = float(np.mean(ious))
     writer.add_scalar("Validation/PSNR", avg_psnr, epoch)
     writer.add_scalar("Validation/SSIM", avg_ssim, epoch)
-    print(f"Validation Epoch {epoch} -> Avg PSNR: {avg_psnr:.2f}, Avg SSIM: {avg_ssim:.3f}")
+    writer.add_scalar("Validation/Edge_IoU", avg_iou, epoch)
+    print(f"Validation Epoch {epoch} -> Avg PSNR: {avg_psnr:.2f}, Avg SSIM: {avg_ssim:.3f}, Avg IoU: {avg_iou:.3f}")
     return avg_psnr
 
 
@@ -349,6 +353,15 @@ def edge_map(x: torch.Tensor) -> torch.Tensor:
 def stroke_loss(fake: torch.Tensor, ske: torch.Tensor) -> torch.Tensor:
     """Approximate stroke consistency loss with edge maps."""
     return F.l1_loss(edge_map(fake), edge_map(ske))
+
+
+def edge_iou(fake: torch.Tensor, ske: torch.Tensor) -> torch.Tensor:
+    """Return IoU of edge maps."""
+    f = edge_map(fake) > 0.5
+    s = edge_map(ske) > 0.5
+    inter = torch.sum(f & s, dim=(1, 2, 3)).float()
+    union = torch.sum(f | s, dim=(1, 2, 3)).float()
+    return torch.mean(inter / (union + 1e-6))
 
 def add_noise(t: torch.Tensor, std: float = 0.05) -> torch.Tensor:
     """Add Gaussian noise for discriminator input."""
@@ -469,6 +482,33 @@ class FontPairDataset(Dataset):
         return s_tensor, t_tensor, sk_tensor
 
 
+class PreprocessedFontDataset(Dataset):
+    """Load pre-rendered ``.pt`` samples for fast training."""
+
+    def __init__(self, data_dir: str, char_codes: list[int] | None = None) -> None:
+        self.paths = []
+        if char_codes is None:
+            files = sorted(glob.glob(os.path.join(data_dir, "*.pt")))
+            self.paths = files
+        else:
+            for c in char_codes:
+                p = os.path.join(data_dir, f"{c}.pt")
+                if os.path.exists(p):
+                    self.paths.append(p)
+        self.norm = T.Normalize((0.5,), (0.5,))
+
+    def __len__(self) -> int:
+        return len(self.paths)
+
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        item = torch.load(self.paths[index], map_location="cpu")
+        src = self.norm(item["source"].float() / 255.0)
+        tgt = self.norm(item["target"].float() / 255.0)
+        ske = self.norm(item["skeleton"].float() / 255.0)
+        src = torch.cat([ske, src], dim=0)
+        return src, tgt, ske
+
+
 def get_norm_layer(norm_type: str = "instance") -> type[nn.Module]:
     """Return normalization layer class."""
     if norm_type == "batch":
@@ -572,22 +612,38 @@ def train(config: dict) -> None:
     writer.add_text("Config", f"<pre>{pprint.pformat(config)}</pre>", 0)
     with open(os.path.join(run_dir, "config.json"), "w", encoding="utf-8") as fp:
         json.dump(config, fp, indent=4, ensure_ascii=False)
-    os.makedirs(config["source_data_dir"], exist_ok=True)
-    os.makedirs(config["target_data_dir"], exist_ok=True)
-    char_map = build_learning_char_map(
-        font_path=config["target_font_path"],
-        candidate_chars=config["candidate_chars"],
-        external_list_path=config.get("learning_list_file"),
-    )
-    all_codes = list(char_map.keys())
+    if config.get("preprocessed_dir"):
+        files = sorted(glob.glob(os.path.join(config["preprocessed_dir"], "*.pt")))
+        all_codes = [int(os.path.splitext(os.path.basename(p))[0]) for p in files]
+    else:
+        os.makedirs(config["source_data_dir"], exist_ok=True)
+        os.makedirs(config["target_data_dir"], exist_ok=True)
+        char_map = build_learning_char_map(
+            font_path=config["target_font_path"],
+            candidate_chars=config["candidate_chars"],
+            external_list_path=config.get("learning_list_file"),
+        )
+        for code, glyph in char_map.items():
+            render_char_to_png(
+                config["ref_font_path"],
+                glyph,
+                os.path.join(config["source_data_dir"], f"{code}.png"),
+                size=config["img_size"],
+            )
+            render_char_to_png(
+                config["target_font_path"],
+                glyph,
+                os.path.join(config["target_data_dir"], f"{code}.png"),
+                size=config["img_size"],
+            )
+        all_codes = list(char_map.keys())
+
     random.shuffle(all_codes)
     val_size = int(len(all_codes) * config.get("val_split_ratio", 0.1))
     val_codes = all_codes[:val_size]
     train_codes = all_codes[val_size:]
     print(f"[Info] Data split -> Train: {len(train_codes)}, Validation: {len(val_codes)}")
-    for code, glyph in char_map.items():
-        render_char_to_png(config["ref_font_path"], glyph, os.path.join(config["source_data_dir"], f"{code}.png"), size=config["img_size"])
-        render_char_to_png(config["target_font_path"], glyph, os.path.join(config["target_data_dir"], f"{code}.png"), size=config["img_size"])
+
     tf_s = T.Compose(
         [
             T.RandomApply([lambda img: morphology_transform(img)], p=0.2),
@@ -600,28 +656,34 @@ def train(config: dict) -> None:
         ]
     )
     tf_t = T.Compose([T.RandomApply([lambda img: morphology_transform(img)], p=0.1)])
-    train_ds = FontPairDataset(
-        config["source_data_dir"],
-        config["target_data_dir"],
-        transform_source_pil=tf_s,
-        transform_target_pil=tf_t,
-        transform_skel_pil=None,
-        img_size=config["img_size"],
-        is_stage2=config["stage_name"] == "progressive_512",
-        rehearsal_ratio=config.get("rehearsal_ratio", 0.0),
-        rehearsal_source_dir=config.get("rehearsal_source_dir"),
-        rehearsal_target_dir=config.get("rehearsal_target_dir"),
-        char_codes=train_codes,
-        skeleton_dir=config.get("skeleton_dir"),
-    )
-    val_ds = FontPairDataset(
-        config["source_data_dir"],
-        config["target_data_dir"],
-        transform_skel_pil=None,
-        img_size=config["img_size"],
-        char_codes=val_codes,
-        skeleton_dir=config.get("skeleton_dir"),
-    )
+    if config.get("preprocessed_dir"):
+        train_ds = PreprocessedFontDataset(config["preprocessed_dir"], train_codes)
+        val_ds = PreprocessedFontDataset(config["preprocessed_dir"], val_codes)
+        in_nc = 2
+    else:
+        train_ds = FontPairDataset(
+            config["source_data_dir"],
+            config["target_data_dir"],
+            transform_source_pil=tf_s,
+            transform_target_pil=tf_t,
+            transform_skel_pil=None,
+            img_size=config["img_size"],
+            is_stage2=config["stage_name"] == "progressive_512",
+            rehearsal_ratio=config.get("rehearsal_ratio", 0.0),
+            rehearsal_source_dir=config.get("rehearsal_source_dir"),
+            rehearsal_target_dir=config.get("rehearsal_target_dir"),
+            char_codes=train_codes,
+            skeleton_dir=config.get("skeleton_dir"),
+        )
+        val_ds = FontPairDataset(
+            config["source_data_dir"],
+            config["target_data_dir"],
+            transform_skel_pil=None,
+            img_size=config["img_size"],
+            char_codes=val_codes,
+            skeleton_dir=config.get("skeleton_dir"),
+        )
+        in_nc = 2 if config.get("skeleton_dir") else 1
     dl = DataLoader(
         train_ds,
         batch_size=config["batch_size"],
@@ -802,6 +864,7 @@ def main() -> None:
     )
     parser.add_argument("--batch_size", type=int, default=None, help="Batch size override")
     parser.add_argument("--skeleton_dir", type=str, default=None, help="Directory of skeleton images")
+    parser.add_argument("--preprocessed_dir", type=str, default=None, help="Directory of preprocessed .pt files")
     parser.add_argument(
         "--stroke_lambda",
         type=float,
@@ -857,6 +920,7 @@ def main() -> None:
         "learning_list_file": args.char_list,
         "checkpoint_dir": args.checkpoint_dir,
         "skeleton_dir": args.skeleton_dir,
+        "preprocessed_dir": args.preprocessed_dir,
         "stroke_lambda": args.stroke_lambda,
     }
 

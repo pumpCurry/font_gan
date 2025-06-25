@@ -58,9 +58,11 @@ python train_pix2pix_pro.py \
   --stage s1_256 \
   --ref_font ./fonts/reference_font.otf \
   --target_font ./fonts/GD-HighwayGothicJA.otf \
-  --skeleton_dir ./data/skeleton
+  --skeleton_dir ./data/skeleton \
+  --preprocessed_dir ./data/preprocessed/256
 
 ``--skeleton_dir`` には ``prepare_skeleton_data.py`` で生成した骨格画像のディレクトリを指定します。指定しない場合は1チャネル入力となります。
+``--preprocessed_dir`` を指定すると、事前生成済みの ``.pt`` データを直接読み込めるため、学習開始前のレンダリングを省略できます。
 ストローク損失 ``--stroke_lambda`` を与えると、生成画像の細線化結果と骨格画像の L1 距離を損失に加えます。
 
 python train_pix2pix_pro.py \
