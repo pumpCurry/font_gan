@@ -55,3 +55,17 @@ python train_pix2pix_pro.py --stage s1_256 \
 ```
 
 ``output_chars.txt`` には抽出された文字が連続した文字列として書き出されます。
+
+## フォント収録済み文字をすべて列挙する場合
+
+``--dump_registed_all_char`` を使うと、指定フォントに登録されている文字を
+Unicode 全域にわたり走査して抽出します。未定義コードポイントや描画しても
+白紙となるグリフは除外されます。
+
+```bash
+python train_pix2pix_pro.py --stage s1_256 \
+  --target_font ./fonts/base.otf \
+  --dump_registed_all_char all_chars.txt
+```
+
+結果は ``all_chars.txt`` に 1 行の文字列として保存されます。
