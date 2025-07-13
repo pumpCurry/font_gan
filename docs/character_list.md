@@ -41,3 +41,17 @@ python train_pix2pix_pro.py --stage s1_256 \
 ```
 
 ``chars.txt`` に必ず学習したい文字を、``skip.txt`` に除外したい文字を列挙します。
+
+## 文字一覧だけを抽出したい場合
+
+``--dump_char_string`` を指定すると、候補文字をフィルタリングした結果を
+1 行の文字列としてファイルへ保存して終了します。空白文字や空白グリフは
+自動的に除外されます。
+
+```bash
+python train_pix2pix_pro.py --stage s1_256 \
+  --ref_font ./fonts/ref.otf --target_font ./fonts/base.otf \
+  --dump_char_string output_chars.txt
+```
+
+``output_chars.txt`` には抽出された文字が連続した文字列として書き出されます。
