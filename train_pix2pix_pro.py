@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.80 (PR #39)
+:version: 1.0.85 (PR #41)
 :since:   1.0.30 (PR #14)
-:last-modified: 2025-07-13 22:57:16 JST+9
+:last-modified: 2025-07-14 02:00:20 JST+9
 :todo:
     - Improve configurability via YAML
 """
@@ -23,6 +23,8 @@ import pprint
 import time
 import json
 import math
+import sys
+import unicodedata
 from collections.abc import Callable
 
 
@@ -203,6 +205,53 @@ def dump_char_string(
     with open(output_path, "w", encoding="utf-8") as fp:
         fp.write(char_str)
     print(f"[Info] Character string saved to: {output_path}")
+
+
+def dump_registed_all_char(font_path: str, output_path: str, size: int = 256) -> None:
+    """Enumerate all supported characters in ``font_path``.
+
+    A character is considered supported when it has an assigned Unicode name and
+    rendering the glyph with ``Pillow`` does not result in an almost blank
+    image. The scan range is ``U+0000`` through ``sys.maxunicode``.
+
+    :param font_path: Path to the font file to inspect.
+    :type font_path: str
+    :param output_path: Destination text file path.
+    :type output_path: str
+    :param size: Rendering size for blank check.
+    :type size: int
+    """
+    font = ImageFont.truetype(font_path, int(size * 0.8))
+    registered: list[str] = []
+    for code in range(sys.maxunicode + 1):
+        ch = chr(code)
+        if ch.isspace():
+            continue
+        try:
+            unicodedata.name(ch)
+        except ValueError:
+            continue
+
+        img = Image.new("L", (size, size), color=255)
+        draw = ImageDraw.Draw(img)
+        try:
+            bbox = draw.textbbox((0, 0), ch, font=font)
+            w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            x = (size - w) / 2 - bbox[0]
+            y = (size - h) / 2 - bbox[1]
+        except AttributeError:
+            w, h = draw.textsize(ch, font=font)
+            ascent, _ = font.getmetrics()
+            x = (size - w) / 2
+            y = (size - ascent) / 2
+        draw.text((x, y), ch, font=font, fill=0)
+        arr = np.array(img)
+        if float(np.mean(arr)) <= 250:
+            registered.append(ch)
+
+    with open(output_path, "w", encoding="utf-8") as fp:
+        fp.write("".join(registered))
+    print(f"[Info] Registered characters saved to: {output_path}")
 
 
 def render_char_to_png(font_path: str, char: str, out_path_or_buffer: str | io.BytesIO, size: int = 256) -> Image.Image:
@@ -1077,6 +1126,12 @@ def main() -> None:
         default=None,
         help="Output detected characters to a file and exit",
     )
+    parser.add_argument(
+        "--dump_registed_all_char",
+        type=str,
+        default=None,
+        help="Output all nonblank registered characters in the font and exit",
+    )
 
     args = parser.parse_args()
     print(f"{os.path.basename(__file__)} launched.")
@@ -1118,6 +1173,13 @@ def main() -> None:
             candidate_chars=candidate_chars,
             output_path=args.dump_char_string,
             external_list_path=args.char_list,
+        )
+        return
+
+    if args.dump_registed_all_char:
+        dump_registed_all_char(
+            font_path=args.target_font,
+            output_path=args.dump_registed_all_char,
         )
         return
 
