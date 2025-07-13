@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.54 (PR #24)
+:version: 1.0.80 (PR #38)
 :since:   1.0.15 (PR #7)
-:last-modified: 2025-06-23 05:00:00 JST+9
+:last-modified: 2025-07-13 22:57:24 JST+9
 
 :todo:
     - Refactor training loop for CLI usage
@@ -19,6 +19,7 @@ import io
 import os
 import glob
 import random
+import argparse
 from typing import Callable, Tuple, Dict
 
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
@@ -765,7 +766,8 @@ def train_from_config(config_path: str) -> None:
     train(**cfg)
 
 
-if __name__ == "__main__":
+def _run_example() -> None:
+    """Execute default example training pipeline."""
     TARGET_FONT_PATH = "path/to/GD-HighwayGothicJA.otf"
     REFERENCE_FONT_PATH = "path/to/reference_font.otf"
     OUTPUT_DIR_TRAIN = "data_updated"
@@ -776,19 +778,14 @@ if __name__ == "__main__":
     LEARNING_RATE = 0.0002
     L1_LAMBDA = 100
 
-    common_chars_for_training = {
-        ord("あ"): "あ",
-        ord("い"): "い",
-    }
+    common_chars_for_training = {ord("あ"): "あ", ord("い"): "い"}
 
     if not common_chars_for_training:
         raise ValueError("Training characters not specified")
     if not os.path.exists(TARGET_FONT_PATH) or not os.path.exists(REFERENCE_FONT_PATH):
         raise FileNotFoundError("Font file not found")
 
-    missing_chars_to_generate = {
-        ord("琉"): "琉",
-    }
+    missing_chars_to_generate = {ord("琉"): "琉"}
 
     stagewise_train(
         target_font_path=TARGET_FONT_PATH,
@@ -821,4 +818,20 @@ if __name__ == "__main__":
             out_dir=GENERATED_FONT_DIR,
             batch_size=BATCH_SIZE,
         )
+
+
+def main() -> None:
+    """Entry point for command line execution."""
+    parser = argparse.ArgumentParser(description="Train pix2pix font model")
+    parser.add_argument("--config", type=str, default=None, help="YAML config file")
+    args = parser.parse_args()
+    print(f"{os.path.basename(__file__)} launched.")
+    if args.config:
+        train_from_config(args.config)
+    else:
+        _run_example()
+
+
+if __name__ == "__main__":
+    main()
 

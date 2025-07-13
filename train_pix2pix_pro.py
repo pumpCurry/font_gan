@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.78 (PR #37)
+:version: 1.0.80 (PR #38)
 :since:   1.0.30 (PR #14)
-:last-modified: 2025-07-13 20:17:12 JST+9
+:last-modified: 2025-07-13 22:57:24 JST+9
 :todo:
     - Improve configurability via YAML
 """
@@ -1063,6 +1063,7 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    print(f"{os.path.basename(__file__)} launched.")
 
     candidate_chars = build_candidate_chars(
         include_file=args.include_chars or args.candidate_char_file,
