@@ -1079,6 +1079,7 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    print(f"{os.path.basename(__file__)} launched.")
 
     candidate_chars = build_candidate_chars(
         include_file=args.include_chars or args.candidate_char_file,
