@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.76 (PR #35)
+:version: 1.0.78 (PR #37)
 :since:   1.0.30 (PR #14)
-:last-modified: 2025-06-25 05:29:54 JST+9
+:last-modified: 2025-07-13 20:17:12 JST+9
 :todo:
     - Improve configurability via YAML
 """
@@ -170,6 +170,38 @@ def build_learning_char_map(font_path: str, candidate_chars: dict[int, str], ext
             print(f"  [Warning] Could not render U+{code:04X}: {exc}")
     print(f"[Info] Auto-detect done. {len(learning)}/{len(candidate_chars)} characters selected.")
     return learning
+
+
+def dump_char_string(
+    target_font: str,
+    ref_font: str,
+    candidate_chars: dict[int, str],
+    output_path: str,
+    external_list_path: str | None = None,
+    size: int = 256,
+) -> None:
+    """Write available non-space characters to ``output_path`` and exit.
+
+    :param target_font: Base font file path.
+    :type target_font: str
+    :param ref_font: Reference font file path.
+    :type ref_font: str
+    :param candidate_chars: Mapping of code point to candidate character.
+    :type candidate_chars: dict[int, str]
+    :param output_path: Destination text file path.
+    :type output_path: str
+    :param external_list_path: Optional file listing characters to force use.
+    :type external_list_path: str | None
+    :param size: Rendering size for blank check.
+    :type size: int
+    """
+    filtered = {c: ch for c, ch in candidate_chars.items() if not ch.isspace()}
+    filtered = filter_by_both_fonts(filtered, base_font=target_font, ref_font=ref_font, size=size)
+    char_map = build_learning_char_map(target_font, filtered, external_list_path)
+    char_str = "".join(char_map.values())
+    with open(output_path, "w", encoding="utf-8") as fp:
+        fp.write(char_str)
+    print(f"[Info] Character string saved to: {output_path}")
 
 
 def render_char_to_png(font_path: str, char: str, out_path_or_buffer: str | io.BytesIO, size: int = 256) -> Image.Image:
@@ -1023,6 +1055,12 @@ def main() -> None:
         default=1.0,
         help="Fraction of validation batches for heavy metrics",
     )
+    parser.add_argument(
+        "--dump_char_string",
+        type=str,
+        default=None,
+        help="Output detected characters to a file and exit",
+    )
 
     args = parser.parse_args()
 
@@ -1055,6 +1093,16 @@ def main() -> None:
         base_font=args.target_font,
         ref_font=args.ref_font,
     )
+
+    if args.dump_char_string:
+        dump_char_string(
+            target_font=args.target_font,
+            ref_font=args.ref_font,
+            candidate_chars=candidate_chars,
+            output_path=args.dump_char_string,
+            external_list_path=args.char_list,
+        )
+        return
 
     base_config = {
         "norm_type": "instance",
