@@ -7,9 +7,9 @@
 :author: pumpCurry
 :copyright: (c) pumpCurry 2025 / 5r4ce2
 :license: MIT
-:version: 1.0.80 (PR #38)
+:version: 1.0.80 (PR #39)
 :since:   1.0.30 (PR #14)
-:last-modified: 2025-07-13 22:57:24 JST+9
+:last-modified: 2025-07-13 22:57:16 JST+9
 :todo:
     - Improve configurability via YAML
 """
@@ -23,6 +23,7 @@ import pprint
 import time
 import json
 import math
+from collections.abc import Callable
 
 
 from PIL import Image, ImageDraw, ImageFont
@@ -459,9 +460,9 @@ class FontPairDataset(Dataset):
         self,
         source_dir: str,
         target_dir: str,
-        transform_source_pil: callable | None = None,
-        transform_target_pil: callable | None = None,
-        transform_skel_pil: callable | None = None,
+        transform_source_pil: Callable[[Image.Image], Image.Image] | None = None,
+        transform_target_pil: Callable[[Image.Image], Image.Image] | None = None,
+        transform_skel_pil: Callable[[Image.Image], Image.Image] | None = None,
         img_size: int = 256,
         is_stage2: bool = False,
         rehearsal_ratio: float = 0.0,
@@ -470,7 +471,22 @@ class FontPairDataset(Dataset):
         char_codes: list[int] | None = None,
         skeleton_dir: str | None = None,
     ) -> None:
-        """Initialize dataset with optional skeleton directory."""
+        """Initialize dataset with optional skeleton directory.
+
+        Args:
+            source_dir: Directory containing source font images.
+            target_dir: Directory containing target font images.
+            transform_source_pil: Optional transform applied to the source image.
+            transform_target_pil: Optional transform applied to the target image.
+            transform_skel_pil: Optional transform applied to the skeleton image.
+            img_size: Output image size.
+            is_stage2: Whether stage2 training is active.
+            rehearsal_ratio: Ratio of rehearsal samples used in stage2.
+            rehearsal_source_dir: Directory for rehearsal source images.
+            rehearsal_target_dir: Directory for rehearsal target images.
+            char_codes: List of character codes used for filtering.
+            skeleton_dir: Directory containing skeleton tensors or images.
+        """
         self.skel_paths: list[str] | None = None
         if char_codes is not None:
             self.src_paths = [os.path.join(source_dir, f"{c}.png") for c in char_codes]
